@@ -19,7 +19,10 @@ from backend.models.repository import StalePaymentVersion, transition_payment
 
 pytestmark = [
     pytest.mark.asyncio,
-    pytest.mark.skipif(os.getenv("SLOTHPAY_RUN_DB_TESTS") != "1", reason="Opt in to local PostgreSQL integration tests"),
+    pytest.mark.skipif(
+        os.getenv("SLOTHPAY_RUN_DB_TESTS") != "1",
+        reason="Opt in to local PostgreSQL integration tests",
+    ),
 ]
 
 
@@ -63,15 +66,23 @@ async def test_stale_version_rejected(db_session):
     db_session.add(p)
     await db_session.flush()
     await transition_payment(
-        db_session, payment_id=p.id, expected_version=0,
-        expected_status="CREATED", new_status="APPROVED",
-        actor="test", evidence={"source": "test"},
+        db_session,
+        payment_id=p.id,
+        expected_version=0,
+        expected_status="CREATED",
+        new_status="APPROVED",
+        actor="test",
+        evidence={"source": "test"},
     )
     with pytest.raises(StalePaymentVersion):
         await transition_payment(
-            db_session, payment_id=p.id, expected_version=0,
-            expected_status="CREATED", new_status="APPROVED",
-            actor="test", evidence={"source": "test"},
+            db_session,
+            payment_id=p.id,
+            expected_version=0,
+            expected_status="CREATED",
+            new_status="APPROVED",
+            actor="test",
+            evidence={"source": "test"},
         )
 
 
@@ -79,9 +90,7 @@ async def test_audit_update_delete_blocked(db_session):
     p = payment(str(uuid.uuid4()), str(uuid.uuid4()))
     db_session.add(p)
     await db_session.flush()
-    audit = PaymentAudit(
-        payment_id=p.id, event_type="TEST", actor="test", evidence={"test": True}
-    )
+    audit = PaymentAudit(payment_id=p.id, event_type="TEST", actor="test", evidence={"test": True})
     db_session.add(audit)
     await db_session.flush()
     with pytest.raises(DBAPIError):

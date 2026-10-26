@@ -1,10 +1,10 @@
 """Import every model so Alembic sees all five tables."""
 
-from .base import Base
-from .payment import Payment
 from .attempt import PaymentAttempt
-from .event import ProviderEvent
 from .audit import PaymentAudit
+from .base import Base
 from .condition import PaymentCondition
+from .event import ProviderEvent
+from .payment import Payment
 
 __all__ = ["Base", "Payment", "PaymentAttempt", "ProviderEvent", "PaymentAudit", "PaymentCondition"]

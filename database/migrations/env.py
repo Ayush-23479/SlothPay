@@ -45,9 +45,7 @@ def do_run_migrations(connection) -> None:
 async def run_migrations_online() -> None:
     section = dict(config.get_section(config.config_ini_section) or {})
     section["sqlalchemy.url"] = database_url()
-    connectable = async_engine_from_config(
-        section, prefix="sqlalchemy.", poolclass=pool.NullPool
-    )
+    connectable = async_engine_from_config(section, prefix="sqlalchemy.", poolclass=pool.NullPool)
     try:
         async with connectable.connect() as connection:
             await connection.run_sync(do_run_migrations)
