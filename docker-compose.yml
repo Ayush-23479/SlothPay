@@ -1,0 +1,68 @@
+# Local stack: PostgreSQL, Redis, Temporal dev server and the API.
+# Start:  docker compose up -d --build
+# Values below can be overridden from a .env file in this folder.
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: slothpay
+      POSTGRES_PASSWORD: slothpay
+      POSTGRES_DB: slothpay
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U slothpay -d slothpay"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  temporal:
+    # Temporal CLI dev server (not for production). UI: http://localhost:8233
+    image: temporalio/temporal:latest
+    command: ["server", "start-dev", "--ip", "0.0.0.0"]
+    ports:
+      - "7233:7233"
+      - "8233:8233"
+
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      ENV: ${ENV:-local}
+      DATABASE_URL: postgresql+asyncpg://slothpay:slothpay@postgres:5432/slothpay
+      REDIS_URL: redis://redis:6379/0
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_NAMESPACE: default
+      PAYPAL_CLIENT_ID: ${PAYPAL_CLIENT_ID:-}
+      PAYPAL_CLIENT_SECRET: ${PAYPAL_CLIENT_SECRET:-}
+      PAYPAL_BASE_URL: ${PAYPAL_BASE_URL:-https://api-m.sandbox.paypal.com}
+      PAYPAL_WEBHOOK_ID: ${PAYPAL_WEBHOOK_ID:-}
+      SENTRY_DSN: ${SENTRY_DSN:-}
+      GEMMA_BASE_URL: ${GEMMA_BASE_URL:-}
+      GEMMA_API_KEY: ${GEMMA_API_KEY:-}
+      GEMMA_MODEL: ${GEMMA_MODEL:-}
+      CHAOS_ENABLED: ${CHAOS_ENABLED:-false}
+      ADMIN_API_KEY: ${ADMIN_API_KEY:-}
+      PASSPORT_SIGNING_SECRET: ${PASSPORT_SIGNING_SECRET:-}
+      FRONTEND_ORIGIN: ${FRONTEND_ORIGIN:-http://localhost:3000}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  pgdata:
