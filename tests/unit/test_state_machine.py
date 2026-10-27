@@ -1,9 +1,13 @@
-
-
+from datetime import UTC, datetime, timedelta
 from itertools import product
 
 import pytest
 
+from backend.state_machine.guards import (
+    OperationNotPermitted,
+    authorization_capturable,
+    claim_status_for,
+)
 from backend.state_machine.policy import allowed_actions, display_status_for
 from backend.state_machine.states import (
     ACTIONS,
@@ -301,8 +305,12 @@ def test_retry_same_request_is_never_offered_while_uncertain():
 def test_retry_same_request_only_after_reconcile_proved_it_did_not_happen():
     assert "RETRY_SAME_REQUEST" not in allowed_actions(SMART, "APPROVED", {})
     assert "RETRY_SAME_REQUEST" in allowed_actions(SMART, "APPROVED", {"retry_allowed": True})
-    assert "RETRY_SAME_REQUEST" in allowed_actions(
+    # on ConditionalPay a retry also needs a provider-confirmed authorization
+    assert "RETRY_SAME_REQUEST" not in allowed_actions(
         COND, "AWAITING_CONDITION", {"retry_allowed": True}
+    )
+    assert "RETRY_SAME_REQUEST" in allowed_actions(
+        COND, "AWAITING_CONDITION", {"retry_allowed": True, "authorization_valid": True}
     )
     assert "RETRY_SAME_REQUEST" in allowed_actions(SMART, "INTENT_CREATED", {"retry_allowed": True})
     assert "RETRY_SAME_REQUEST" not in allowed_actions(SMART, "CAPTURED", {"retry_allowed": True})
@@ -319,19 +327,32 @@ def test_conditionalpay_approved_waits_for_the_automatic_authorization():
 
 
 def test_awaiting_condition_never_captures_until_the_condition_is_verified():
-    assert allowed_actions(COND, "AWAITING_CONDITION", {}) == ["WAIT", "VOID"]
-    assert allowed_actions(COND, "AWAITING_CONDITION", {"condition_verified": False}) == [
-        "WAIT",
-        "VOID",
-    ]
-    assert allowed_actions(COND, "AWAITING_CONDITION", {"condition_verified": "yes"}) == [
-        "WAIT",
-        "VOID",
-    ]
-    assert allowed_actions(COND, "AWAITING_CONDITION", {"condition_verified": True}) == [
-        "CAPTURE",
-        "VOID",
-    ]
+    for ctx in (
+        {},
+        {"condition_verified": False},
+        {"condition_verified": "yes"},
+        {"condition_verified": False, "authorization_valid": True},
+    ):
+        assert allowed_actions(COND, "AWAITING_CONDITION", ctx) == ["WAIT", "VOID"], ctx
+
+
+def test_capture_needs_a_verified_condition_and_a_confirmed_authorization():
+    both = {"condition_verified": True, "authorization_valid": True}
+    assert allowed_actions(COND, "AWAITING_CONDITION", both) == ["CAPTURE", "VOID"]
+
+
+def test_verified_condition_with_unconfirmed_authorization_must_refresh_first():
+    for ctx in (
+        {"condition_verified": True},
+        {"condition_verified": True, "authorization_valid": None},
+        {"condition_verified": True, "authorization_valid": "yes"},  # only True counts
+    ):
+        assert allowed_actions(COND, "AWAITING_CONDITION", ctx) == ["RECONCILE", "VOID"], ctx
+
+
+def test_expired_or_invalid_authorization_never_offers_capture():
+    ctx = {"condition_verified": True, "authorization_valid": False}
+    assert allowed_actions(COND, "AWAITING_CONDITION", ctx) == ["VOID", "CONTACT_SUPPORT"]
 
 
 def test_conditional_only_statuses_offer_nothing_on_smartpay():
@@ -370,6 +391,9 @@ CONTEXTS = [
     {},
     {"condition_verified": True},
     {"condition_verified": False},
+    {"condition_verified": True, "authorization_valid": True},
+    {"condition_verified": True, "authorization_valid": False},
+    {"authorization_valid": True},
     {"retry_allowed": True},
     {"reconcile_exhausted": True},
     {"error_class": "SWITCH_METHOD"},
@@ -389,6 +413,7 @@ def test_capture_and_void_are_never_offered_in_the_wrong_place():
                 path == COND
                 and status == "AWAITING_CONDITION"
                 and ctx.get("condition_verified") is True
+                and ctx.get("authorization_valid") is True
             )
             assert smart_ok or cond_ok, (path, status, ctx)
         if "VOID" in actions:
@@ -427,3 +452,117 @@ def test_the_table_default_status_works_with_the_state_machine():
 def test_is_final():
     assert is_final("CAPTURED") and is_final("failed")
     assert not is_final("UNCERTAIN") and not is_final("nope")
+
+
+# ----------------------------------------- capture / void race (status-level guarantees)
+def test_capture_and_void_claims_are_mutually_exclusive_statuses():
+    """Both are claimable from AWAITING_CONDITION, but neither claim leads to the other."""
+    assert validate_transition(COND, "AWAITING_CONDITION", "CAPTURE_REQUESTED")[0]
+    assert validate_transition(COND, "AWAITING_CONDITION", "VOID_REQUESTED")[0]
+    for first, second in (
+        ("CAPTURE_REQUESTED", "VOID_REQUESTED"),
+        ("VOID_REQUESTED", "CAPTURE_REQUESTED"),
+    ):
+        assert validate_transition(COND, first, second)[0] is False
+        assert second not in next_statuses(COND, first)
+    # nor can an uncertain capture or void resolve into the opposite money move
+    assert validate_transition(COND, "UNCERTAIN", "VOIDED", pending_operation="capture")[0] is False
+    assert validate_transition(COND, "UNCERTAIN", "CAPTURED", pending_operation="void")[0] is False
+    assert resolve_uncertain(COND, "capture", "VOIDED") == "UNCERTAIN"
+    assert resolve_uncertain(COND, "void", "COMPLETED") == "UNCERTAIN"
+
+
+# --------------------------------------------------------------------------- guards
+FRESH_AUTH = {"status": "CREATED", "expiration_time": "2026-11-26T10:00:00Z"}
+NOW = datetime(2026, 10, 27, 10, 0, tzinfo=UTC)
+
+
+def test_authorization_capturable_accepts_a_fresh_created_authorization():
+    assert authorization_capturable(FRESH_AUTH, now=NOW) is True
+
+
+@pytest.mark.parametrize(
+    "authorization",
+    [
+        None,
+        {},
+        "CREATED",
+        {"status": "VOIDED", "expiration_time": "2026-11-26T10:00:00Z"},
+        {"status": "CAPTURED", "expiration_time": "2026-11-26T10:00:00Z"},
+        {"status": "EXPIRED", "expiration_time": "2026-11-26T10:00:00Z"},
+        {"status": "CREATED"},  # no expiry: fail closed
+        {"status": "CREATED", "expiration_time": None},
+        {"status": "CREATED", "expiration_time": "not a date"},
+        {"status": "CREATED", "expiration_time": "2026-10-27T09:00:00Z"},  # already past
+        {"status": "CREATED", "expiration_time": "2026-10-27T10:03:00Z"},  # under 5 min left
+    ],
+)
+def test_authorization_capturable_fails_closed(authorization):
+    assert authorization_capturable(authorization, now=NOW) is False
+
+
+def test_authorization_margin_is_configurable_and_naive_times_count_as_utc():
+    soon = {"status": "CREATED", "expiration_time": "2026-10-27T10:03:00"}
+    assert authorization_capturable(soon, now=NOW, min_remaining=timedelta(minutes=1)) is True
+    assert authorization_capturable(soon, now=NOW) is False
+
+
+def test_claim_status_for_returns_the_status_to_persist_first():
+    ready = {"condition_verified": True, "authorization_valid": True}
+    assert claim_status_for(COND, "AWAITING_CONDITION", "capture", ready) == "CAPTURE_REQUESTED"
+    assert claim_status_for(COND, "AWAITING_CONDITION", "void", {}) == "VOID_REQUESTED"
+    assert claim_status_for(SMART, "APPROVED", "capture", {}) == "CAPTURE_REQUESTED"
+    assert claim_status_for(COND, "APPROVED", "authorize", {}) == "AUTHORIZE_REQUESTED"
+
+
+@pytest.mark.parametrize(
+    "context",
+    [
+        {},
+        {"condition_verified": True},  # authorization never confirmed
+        {"condition_verified": True, "authorization_valid": False},  # expired
+        {"condition_verified": False, "authorization_valid": True},  # condition not met
+    ],
+)
+def test_capture_is_refused_unless_condition_and_authorization_are_both_confirmed(context):
+    with pytest.raises(OperationNotPermitted):
+        claim_status_for(COND, "AWAITING_CONDITION", "capture", context)
+
+
+def test_void_stays_possible_when_the_authorization_cannot_be_captured():
+    expired = {"condition_verified": True, "authorization_valid": False}
+    assert claim_status_for(COND, "AWAITING_CONDITION", "void", expired) == "VOID_REQUESTED"
+
+
+@pytest.mark.parametrize(
+    ("path", "status", "operation"),
+    [
+        (SMART, "AWAITING_CONDITION", "capture"),
+        (SMART, "APPROVED", "void"),
+        (SMART, "APPROVED", "authorize"),
+        (COND, "APPROVED", "capture"),
+        (COND, "CAPTURED", "void"),
+        (COND, "VOIDED", "capture"),
+        (COND, "CAPTURE_REQUESTED", "void"),  # the other claim already won
+        (COND, "VOID_REQUESTED", "capture"),
+        (COND, "UNCERTAIN", "capture"),
+        (COND, "AWAITING_CONDITION", "refund"),
+        ("MAGICPAY", "APPROVED", "capture"),
+        (COND, "NOPE", "capture"),
+    ],
+)
+def test_claim_status_for_refuses_everything_else(path, status, operation):
+    ready = {"condition_verified": True, "authorization_valid": True}
+    with pytest.raises(OperationNotPermitted):
+        claim_status_for(path, status, operation, ready)
+
+
+def test_claim_status_for_never_returns_a_status_validate_transition_would_refuse():
+    for path, status, operation, ctx in product(
+        PATHS, ALL_STATUSES, ("authorize", "capture", "void"), CONTEXTS
+    ):
+        try:
+            target = claim_status_for(path, status, operation, ctx)
+        except OperationNotPermitted:
+            continue
+        assert validate_transition(path, status, target)[0], (path, status, operation, ctx)

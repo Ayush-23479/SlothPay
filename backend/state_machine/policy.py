@@ -1,5 +1,3 @@
-
-
 from __future__ import annotations
 
 from collections.abc import Mapping
@@ -105,10 +103,15 @@ def display_status_for(status: str, context: Context = None) -> str:
 def allowed_actions(path: str, status: str, context: Context = None) -> list[str]:
     """Actions that may be taken right now. Default deny: unknown input returns ['NONE'].
 
-    context may hold: reconcile_exhausted, error_class, condition_verified, retry_allowed.
+    context may hold: reconcile_exhausted, error_class, condition_verified,
+    authorization_valid, retry_allowed.
     CAPTURE is only offered from APPROVED on SmartPay, or from AWAITING_CONDITION on
-    ConditionalPay once the condition is verified. VOID is only offered from
-    AWAITING_CONDITION on ConditionalPay.
+    ConditionalPay once the condition is verified AND the authorization has been confirmed
+    valid by PayPal (authorization_valid is True, see guards.authorization_capturable).
+    VOID is only offered from AWAITING_CONDITION on ConditionalPay.
+    This function is a pure policy check. It does NOT claim the payment: the caller must
+    persist the claim before any PayPal call (see guards.claim_status_for and
+    docs/state-machine-contract.md).
     """
     ctx = context or {}
     p = normalize_path(path)
@@ -135,13 +138,22 @@ def allowed_actions(path: str, status: str, context: Context = None) -> list[str
     elif s == APPROVED:
         actions = [ACTION_CAPTURE] if p == SMARTPAY else [ACTION_WAIT]
     elif s == AWAITING_CONDITION and p == CONDITIONALPAY:
-        if ctx.get("condition_verified") is True:
-            actions = [ACTION_CAPTURE, ACTION_VOID]
-        else:
+        if ctx.get("condition_verified") is not True:
             actions = [ACTION_WAIT, ACTION_VOID]
+        elif ctx.get("authorization_valid") is True:
+            actions = [ACTION_CAPTURE, ACTION_VOID]
+        elif ctx.get("authorization_valid") is False:
+            # The held funds are expired or no longer capturable: never capture.
+            actions = [ACTION_VOID, ACTION_CONTACT_SUPPORT]
+        else:
+            # Condition verified but authorization not yet confirmed by PayPal: refresh first.
+            actions = [ACTION_RECONCILE, ACTION_VOID]
     else:
         return [ACTION_NONE]
 
-    if ctx.get("retry_allowed") is True and s in _RETRY_STATUSES:
+    retry_ok = ctx.get("retry_allowed") is True and s in _RETRY_STATUSES
+    if s == AWAITING_CONDITION and ctx.get("authorization_valid") is not True:
+        retry_ok = False  # never retry a money move on an unconfirmed authorization
+    if retry_ok:
         actions.append(ACTION_RETRY_SAME_REQUEST)
     return actions
