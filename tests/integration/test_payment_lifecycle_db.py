@@ -193,14 +193,14 @@ async def test_smartpay_capture_has_committed_claim_and_attempt_before_call(make
             assert attempt.status == "STARTED"
             assert attempt.request_id == request_id
         return {
-            "purchase_units": [
-                {"payments": {"captures": [{"id": "CAP-1", "status": "COMPLETED"}]}}
-            ]
+            "purchase_units": [{"payments": {"captures": [{"id": "CAP-1", "status": "COMPLETED"}]}}]
         }
 
     paypal.capture_order.side_effect = capture_at_provider
     async with maker() as session:
-        result = await execute_operation(session, paypal, payment_id=payment_id, operation="capture")
+        result = await execute_operation(
+            session, paypal, payment_id=payment_id, operation="capture"
+        )
     assert result["state"] == "CAPTURED"
     async with maker() as session:
         payment = await session.get(Payment, payment_id)
@@ -213,9 +213,7 @@ async def test_smartpay_capture_has_committed_claim_and_attempt_before_call(make
 
 
 async def test_unknown_capture_outcome_is_persisted_and_not_replayed(maker):
-    payment_id = await seed(
-        maker, status="APPROVED", order_id=f"ORDER-{uuid.uuid4().hex}"
-    )
+    payment_id = await seed(maker, status="APPROVED", order_id=f"ORDER-{uuid.uuid4().hex}")
     paypal = gateway()
     paypal.capture_order.side_effect = PayPalOutcomeUnknown("simulated timeout")
     async with maker() as session:
@@ -229,9 +227,9 @@ async def test_unknown_capture_outcome_is_persisted_and_not_replayed(maker):
         assert payment.status == "UNCERTAIN"
         assert attempt.status == "UNCERTAIN"
         count = await session.scalar(
-            select(func.count()).select_from(PaymentAttempt).where(
-                PaymentAttempt.payment_id == payment_id
-            )
+            select(func.count())
+            .select_from(PaymentAttempt)
+            .where(PaymentAttempt.payment_id == payment_id)
         )
         assert count == 1
     async with maker() as session:
@@ -242,12 +240,12 @@ async def test_unknown_capture_outcome_is_persisted_and_not_replayed(maker):
 
 async def test_conditional_authorization_persists_authorization_id(maker):
     order_id = f"ORDER-{uuid.uuid4().hex}"
-    payment_id = await seed(
-        maker, mode="CONDITIONALPAY", status="APPROVED", order_id=order_id
-    )
+    payment_id = await seed(maker, mode="CONDITIONALPAY", status="APPROVED", order_id=order_id)
     paypal = gateway()
     async with maker() as session:
-        result = await execute_operation(session, paypal, payment_id=payment_id, operation="authorize")
+        result = await execute_operation(
+            session, paypal, payment_id=payment_id, operation="authorize"
+        )
     assert result["state"] == "AWAITING_CONDITION"
     paypal.authorize_order.assert_awaited_once()
     async with maker() as session:
