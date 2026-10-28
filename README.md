@@ -1,82 +1,66 @@
-# SlothPay
+![gophish logo](https://raw.github.com/gophish/gophish/master/static/images/gophish_purple.png)
 
-AI-powered payment orchestration, conditional payments and safe transaction recovery on top of PayPal (**sandbox only**).
+Gophish
+=======
 
-SlothPay makes a payment safe even when the internet freezes, the buyer taps twice, or PayPal's answer gets lost. It has two payment paths that never run one after another for the same payment:
+![Build Status](https://github.com/gophish/gophish/workflows/CI/badge.svg) [![GoDoc](https://godoc.org/github.com/gophish/gophish?status.svg)](https://godoc.org/github.com/gophish/gophish)
 
-- **SmartPay:** the buyer approves, PayPal captures immediately.
-- **ConditionalPay:** the buyer approves, PayPal authorizes (holds) the money, SlothPay waits for a verified condition, then captures or voids.
+Gophish: Open-Source Phishing Toolkit
 
-Duplicate protection has two layers: our own idempotency key, and a stable PayPal-Request-Id so repeating a request returns the original result. SlothPay never blindly retries a charge after a timeout; it asks PayPal what happened first.
+[Gophish](https://getgophish.com) is an open-source phishing toolkit designed for businesses and penetration testers. It provides the ability to quickly and easily setup and execute phishing engagements and security awareness training.
 
-> Status: foundation only (Task 1). Payment logic is added task by task.
+### Install
 
-## Prerequisites
+Installation of Gophish is dead-simple - just download and extract the zip containing the [release for your system](https://github.com/gophish/gophish/releases/), and run the binary. Gophish has binary releases for Windows, Mac, and Linux platforms.
 
-- Python 3.12
-- Node.js (current LTS) and npm
-- Docker Desktop (for PostgreSQL, Redis and Temporal)
-- A free PayPal developer account with a sandbox app (developer.paypal.com)
+### Building From Source
+**If you are building from source, please note that Gophish requires Go v1.10 or above!**
 
-## Quick start (backend, no Docker)
+To build Gophish from source, simply run ```go install github.com/gophish/gophish@latest``` and ```cd``` into the project source directory. Then, run ```go build```. After this, you should have a binary called ```gophish``` in the current directory.
 
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements-dev.txt
-cp .env.example .env          # then edit .env
-python -m pytest
-uvicorn backend.main:app --reload
-# in another terminal:
-curl http://localhost:8000/health
+### Docker
+You can also use Gophish via the official Docker container [here](https://hub.docker.com/r/gophish/gophish/).
+
+### Setup
+After running the Gophish binary, open an Internet browser to https://localhost:3333 and login with the default username and password listed in the log output.
+e.g.
+```
+time="2020-07-29T01:24:08Z" level=info msg="Please login with the username admin and the password 4304d5255378177d"
 ```
 
-## Run the whole local stack with Docker Compose
+Releases of Gophish prior to v0.10.1 have a default username of `admin` and password of `gophish`.
 
-```bash
-cp .env.example .env
-docker compose up -d --build
-docker compose ps
-curl http://localhost:8000/health
+### Documentation
+
+Documentation can be found on our [site](http://getgophish.com/documentation). Find something missing? Let us know by filing an issue!
+
+### Issues
+
+Find a bug? Want more features? Find something missing in the documentation? Let us know! Please don't hesitate to [file an issue](https://github.com/gophish/gophish/issues/new) and we'll get right on it.
+
+### License
 ```
+Gophish - Open-Source Phishing Framework
 
-Services: PostgreSQL 16 (5432), Redis 7 (6379), Temporal dev server (7233, UI on 8233), API (8000).
+The MIT License (MIT)
 
-## Frontend
+Copyright (c) 2013 - 2020 Jordan Wright
 
-```bash
-cd frontend
-npm install
-npm run build
-npm run dev      # http://localhost:3000
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software ("Gophish Community Edition") and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
 ```
-
-## Folder map
-
-| Folder | Purpose |
-| --- | --- |
-| backend/config | Settings and configuration |
-| backend/models | Database models and repository (Task 2) |
-| backend/state_machine | Payment states and rules (Task 3) |
-| backend/payments | PayPal gateway (Task 4) |
-| backend/reliability | Duplicate protection, reconciliation, rescue (Tasks 5, 8, 12) |
-| backend/orchestration | SmartPay and ConditionalPay flows (Task 6) |
-| backend/webhooks | PayPal webhooks (Task 7) |
-| backend/workflows | Temporal workflows (Task 9) |
-| backend/api | HTTP routes (Task 10) |
-| backend/notifications | Live updates over SSE (Task 10) |
-| backend/intelligence | AI analysis with fallbacks (Task 11) |
-| database | Migrations and SQL views |
-| frontend | Next.js dashboard and Trust Passport |
-| tests | Unit, integration and end-to-end tests |
-| docs | Architecture and submission docs |
-
-## Safety notes
-
-- PayPal sandbox only. The app refuses to start in demo or production mode with a non-sandbox PayPal URL.
-- Never commit secrets. Only `.env.example` is committed.
-- Controlled-failure tools (chaos) are off by default.
-
-## License
-
-MIT, see [LICENSE](LICENSE).
