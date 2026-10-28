@@ -4,8 +4,8 @@ Revision ID: 0002_webhook_processing
 Revises: 0001_payment_ledger
 """
 
-from alembic import op
 import sqlalchemy as sa
+from alembic import op
 from sqlalchemy.dialects.postgresql import UUID
 
 revision = "0002_webhook_processing"

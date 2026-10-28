@@ -11,9 +11,9 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from backend.config.settings import get_settings
 from backend.models.attempt import PaymentAttempt
+from backend.models.audit import PaymentAudit
 from backend.models.event import ProviderEvent
 from backend.models.payment import Payment
-from backend.models.audit import PaymentAudit
 from backend.webhooks.processing import process_webhook_event
 
 pytestmark = [
