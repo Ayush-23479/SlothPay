@@ -13,19 +13,59 @@ import httpx
 from backend.config.settings import get_settings
 
 SANDBOX_URL = "https://api-m.sandbox.paypal.com"
+# Task 4 rule: every PayPal call has a 3 second timeout.
+DEFAULT_TIMEOUT_SECONDS = 3.0
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 
 
 class PayPalError(Exception):
-    """A definitive API error response from PayPal (not proof of payment outcome)."""
+    """A definitive API error response from PayPal (not proof of payment outcome).
 
-    def __init__(self, status_code: int, message: str):
-        super().__init__(f"PayPal HTTP {status_code}: {message}")
+    Carries what later tasks need to classify the error:
+    - status_code: the HTTP status
+    - body: the parsed JSON error body ({} if PayPal sent none)
+    - issue: body["details"][0]["issue"], e.g. "INSTRUMENT_DECLINED" (or None)
+    - error_name: body["name"], e.g. "UNPROCESSABLE_ENTITY" (or None)
+    - debug_id: the PayPal-Debug-Id response header (or None)
+    """
+
+    def __init__(
+        self,
+        status_code: int,
+        message: str,
+        *,
+        body: dict[str, Any] | None = None,
+        debug_id: str | None = None,
+    ):
         self.status_code = status_code
+        self.body: dict[str, Any] = body or {}
+        self.debug_id = debug_id
+        details = self.body.get("details")
+        first = details[0] if isinstance(details, list) and details else None
+        issue = first.get("issue") if isinstance(first, dict) else None
+        self.issue: str | None = issue if isinstance(issue, str) else None
+        name = self.body.get("name")
+        self.error_name: str | None = name if isinstance(name, str) else None
+        suffix = ""
+        if self.issue:
+            suffix += f" issue={self.issue}"
+        if debug_id:
+            suffix += f" debug_id={debug_id}"
+        super().__init__(f"PayPal HTTP {status_code}: {message}{suffix}")
 
 
 class PayPalOutcomeUnknown(Exception):
     """An operation may have happened; reconcile it before considering retry."""
+
+    def __init__(self, message: str, *, debug_id: str | None = None):
+        super().__init__(message)
+        self.debug_id = debug_id
+
+
+class PayPalNotSent(Exception):
+    """The request never reached PayPal's money endpoint (for example the OAuth
+    token could not be fetched). Nothing happened, so the caller may safely retry.
+    """
 
 
 class PayPalClient:
@@ -38,7 +78,7 @@ class PayPalClient:
         client_secret: str | None = None,
         base_url: str | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
-        timeout: float = 15.0,
+        timeout: float = DEFAULT_TIMEOUT_SECONDS,
     ) -> None:
         settings = get_settings()
         self._id = client_id if client_id is not None else settings.PAYPAL_CLIENT_ID
@@ -86,6 +126,15 @@ class PayPalClient:
         # must implement PayPal-specific currency precision/availability policy.
         return {"currency_code": currency, "value": f"{amount:.2f}"}
 
+    @staticmethod
+    def _json_dict(response: httpx.Response) -> dict[str, Any]:
+        """Parse a response body as a JSON object; {} if it is empty or not one."""
+        try:
+            data = response.json()
+        except ValueError:
+            return {}
+        return data if isinstance(data, dict) else {}
+
     async def _oauth_token(self) -> str:
         if self._token and time.monotonic() < self._token_expiry:
             return self._token
@@ -100,9 +149,15 @@ class PayPalClient:
                     data={"grant_type": "client_credentials"},
                 )
             except httpx.RequestError as exc:
-                raise PayPalOutcomeUnknown("PayPal OAuth network failure") from exc
+                # No money request has been sent yet, so this is NOT "outcome unknown".
+                raise PayPalNotSent("PayPal OAuth network failure; request not sent") from exc
             if not 200 <= response.status_code < 300:
-                raise PayPalError(response.status_code, "OAuth authentication failed")
+                raise PayPalError(
+                    response.status_code,
+                    "OAuth authentication failed",
+                    body=self._json_dict(response),
+                    debug_id=response.headers.get("PayPal-Debug-Id"),
+                )
             try:
                 payload = response.json()
                 token = payload["access_token"]
@@ -110,7 +165,7 @@ class PayPalClient:
                 if not isinstance(token, str) or not token or ttl <= 0:
                     raise ValueError("Invalid token")
             except (ValueError, TypeError, KeyError) as exc:
-                raise PayPalOutcomeUnknown("Malformed PayPal OAuth response") from exc
+                raise PayPalNotSent("Malformed PayPal OAuth response; request not sent") from exc
             self._token = token
             self._token_expiry = time.monotonic() + max(0, ttl - 60)
             return token
@@ -128,14 +183,18 @@ class PayPalClient:
         request_id: str | None = None,
         financial: bool = False,
     ) -> dict[str, Any]:
+        # Validate everything locally first, so bad input never causes a network call.
+        if financial and not request_id:
+            raise ValueError("Financial operations require a stable persisted request_id")
+        if request_id:
+            request_id = self._identifier(request_id, "request_id")
+
         token = await self._oauth_token()
         headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
         if json_body is not None:
             headers["Content-Type"] = "application/json"
-        if financial and not request_id:
-            raise ValueError("Financial operations require a stable persisted request_id")
         if request_id:
-            headers["PayPal-Request-Id"] = self._identifier(request_id, "request_id")
+            headers["PayPal-Request-Id"] = request_id
         try:
             response = await self._http.request(
                 method, path, json=json_body, headers=headers
@@ -144,20 +203,29 @@ class PayPalClient:
             raise PayPalOutcomeUnknown(
                 "PayPal network outcome unknown: reconcile before any retry"
             ) from exc
+        debug_id = response.headers.get("PayPal-Debug-Id")
         if response.status_code >= 500:
             raise PayPalOutcomeUnknown(
-                f"PayPal server returned HTTP {response.status_code}; reconcile before retry"
+                f"PayPal server returned HTTP {response.status_code}; reconcile before retry",
+                debug_id=debug_id,
             )
         if not 200 <= response.status_code < 300:
-            raise PayPalError(response.status_code, "API request rejected; inspect provider logs")
+            raise PayPalError(
+                response.status_code,
+                "API request rejected",
+                body=self._json_dict(response),
+                debug_id=debug_id,
+            )
         if not response.content:
             return {"http_status": response.status_code}
         try:
             result = response.json()
         except ValueError as exc:
-            raise PayPalOutcomeUnknown("Malformed response: reconcile provider state") from exc
+            raise PayPalOutcomeUnknown(
+                "Malformed response: reconcile provider state", debug_id=debug_id
+            ) from exc
         if not isinstance(result, dict):
-            raise PayPalOutcomeUnknown("Unexpected response shape")
+            raise PayPalOutcomeUnknown("Unexpected response shape", debug_id=debug_id)
         return result
 
     async def create_order(
