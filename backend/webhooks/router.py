@@ -1,9 +1,9 @@
 """Verified, deduplicated webhook inbox. No payment state transitions yet."""
 
 from __future__ import annotations
-from typing import Annotated
+
 import json
-from typing import Any
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.dialects.postgresql import insert
