@@ -1,12 +1,15 @@
-"""One-shot, operator-invoked processor for verified durable PayPal webhook events.
+"""Explicit, one-shot processing of verified PayPal webhook events.
 
-Run on a disposable/test DB first: python -m backend.webhooks.worker
-Never sends money operations. Events needing review remain recorded for triage.
+No database access occurs on ``--help`` or when no ``--run`` flag is supplied.
+Run only against a configured sandbox database; this worker sends no money POSTs.
 """
 
 from __future__ import annotations
 
+import argparse
 import asyncio
+import json
+from collections.abc import Sequence
 
 from sqlalchemy import column, select, table
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -17,21 +20,22 @@ from backend.webhooks.processing import process_webhook_event
 
 
 async def process_batch(limit: int = 50) -> list[dict[str, str | None]]:
+    """Process at most ``limit`` durable verified events, with transactional dedupe."""
     if not 1 <= limit <= 500:
         raise ValueError("limit must be between 1 and 500")
     engine = create_async_engine(get_settings().DATABASE_URL)
-    results = []
+    results: list[dict[str, str | None]] = []
     try:
         maker = async_sessionmaker(engine, expire_on_commit=False)
         async with maker() as session:
-            # Candidate query intentionally does not lock; the individual event
-            # processing transaction locks and ensures exactly-once bookkeeping.
             pending = await session.scalars(
                 select(ProviderEvent.event_id)
                 .where(ProviderEvent.provider == "paypal", ProviderEvent.verified.is_(True))
                 .where(
                     ~ProviderEvent.id.in_(
-                        select(column("provider_event_id")).select_from(table("webhook_processing"))
+                        select(column("provider_event_id")).select_from(
+                            table("webhook_processing")
+                        )
                     )
                 )
                 .order_by(ProviderEvent.received_at, ProviderEvent.id)
@@ -55,11 +59,32 @@ async def process_batch(limit: int = 50) -> list[dict[str, str | None]]:
     return results
 
 
-def main() -> None:
-    import json
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="python -m backend.webhooks.worker",
+        description="Process verified PayPal sandbox webhook inbox events only with --run.",
+    )
+    parser.add_argument(
+        "--run", action="store_true", help="Explicitly process a batch of stored events"
+    )
+    parser.add_argument(
+        "--limit", type=int, default=50, metavar="N",
+        help="Maximum events per run (1–500; default: 50)",
+    )
+    return parser
 
-    print(json.dumps(asyncio.run(process_batch()), indent=2))
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if not args.run:
+        parser.print_help()
+        return 0
+    if not 1 <= args.limit <= 500:
+        parser.error("--limit must be between 1 and 500")
+    print(json.dumps(asyncio.run(process_batch(limit=args.limit)), indent=2))
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
