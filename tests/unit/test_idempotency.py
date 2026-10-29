@@ -61,12 +61,12 @@ class FakeRepo:
         self.competitor: dict | None = None  # row another process "inserts first"
 
     def add_row(self, owner=OWNER, key="other-key-0001", amount="500.00", currency="USD",
-                path="SMARTPAY", status="CREATED", age_seconds=0):
+                path="SMARTPAY", status="CREATED", age_seconds=0, order_id=None):
         row = {
             "id": str(uuid.uuid4()),
             "owner_id": owner,
             "idempotency_key": key,
-            "merchant_order_id": key,
+            "merchant_order_id": order_id or key,
             "path": path,
             "amount": Decimal(amount),
             "currency": currency,
@@ -82,6 +82,19 @@ class FakeRepo:
         row = self.intents.get((owner_id, idempotency_key))
         return dict(row) if row else None
 
+    async def get_intent_by_order_id(self, session, owner_id, merchant_order_id):
+        await asyncio.sleep(0)
+        for row in self.intents.values():
+            if row["owner_id"] == owner_id and row["merchant_order_id"] == merchant_order_id:
+                return dict(row)
+        return None
+
+    async def get_intent_created_evidence(self, session, payment_id):
+        for event in self.audit:
+            if event["payment_id"] == payment_id and event["event_type"] == "INTENT_CREATED":
+                return event["evidence"]
+        return None
+
     async def create_intent(self, session, **kwargs):
         await asyncio.sleep(0)
         self.create_calls += 1
@@ -89,15 +102,19 @@ class FakeRepo:
             rival = self.competitor
             self.intents[(rival["owner_id"], rival["idempotency_key"])] = rival
             self.competitor = None
-        key = (kwargs["owner_id"], kwargs["idempotency_key"])
-        if key in self.intents:
-            raise IntegrityError("INSERT", {}, Exception("duplicate key"))
+        for row in self.intents.values():  # the two UNIQUE constraints
+            if row["owner_id"] == kwargs["owner_id"] and (
+                row["idempotency_key"] == kwargs["idempotency_key"]
+                or row["merchant_order_id"] == kwargs["merchant_order_id"]
+            ):
+                raise IntegrityError("INSERT", {}, Exception("duplicate key"))
         row = self.add_row(
             owner=kwargs["owner_id"],
             key=kwargs["idempotency_key"],
             amount=str(kwargs["amount"]),
             currency=kwargs["currency"],
             path=kwargs["path"],
+            order_id=kwargs["merchant_order_id"],
         )
         return dict(row)
 
@@ -123,6 +140,10 @@ class FakeRepo:
 def repo(monkeypatch):
     fake = FakeRepo()
     monkeypatch.setattr(idempotency, "get_intent_by_key", fake.get_intent_by_key)
+    monkeypatch.setattr(idempotency, "get_intent_by_order_id", fake.get_intent_by_order_id)
+    monkeypatch.setattr(
+        idempotency, "get_intent_created_evidence", fake.get_intent_created_evidence
+    )
     monkeypatch.setattr(idempotency, "create_intent", fake.create_intent)
     monkeypatch.setattr(idempotency, "find_recent_intents", fake.find_recent_intents)
     monkeypatch.setattr(idempotency, "add_audit_event", fake.add_audit_event)
@@ -169,6 +190,11 @@ async def test_first_register_creates_one_intent_and_audits_it(repo, redis, sess
     assert created[0]["evidence"]["confirmed"] is False
     assert created[0]["payment_id"] == intent["id"]
     assert session.commits == 1
+
+
+async def test_without_an_order_id_the_key_doubles_as_the_order_id(repo, redis, session):
+    intent, _ = await register_intent(session, redis, OWNER, KEY, payload())
+    assert intent["merchant_order_id"] == KEY
 
 
 async def test_same_key_returns_same_intent_with_replay_true(repo, redis, session):
@@ -261,7 +287,200 @@ async def test_unique_violation_without_a_row_to_read_back_is_reraised(
         await register_intent(session, redis, OWNER, KEY, payload())
 
 
-# --- similar-intent guard ----------------------------------------------------------------
+# --- same key, conflicting order id or condition (must be rejected) ----------------------
+
+CONDITION = {"kind": "manual", "description": "Parcel delivered"}
+
+
+async def test_same_key_with_a_different_order_id_raises_payload_mismatch(repo, redis, session):
+    await register_intent(session, redis, OWNER, KEY, payload(merchant_order_id="order-A"))
+    with pytest.raises(PayloadMismatch):
+        await register_intent(session, redis, OWNER, KEY, payload(merchant_order_id="order-B"))
+    assert len(repo.intents) == 1
+
+
+async def test_same_key_with_an_order_id_added_or_dropped_raises_payload_mismatch(
+    repo, redis, session
+):
+    await register_intent(session, redis, OWNER, KEY, payload(merchant_order_id="order-A"))
+    with pytest.raises(PayloadMismatch):  # replay forgets the order id
+        await register_intent(session, redis, OWNER, KEY, payload())
+    other = "key-0000-0002"
+    await register_intent(session, redis, OWNER, other, payload(amount="7.00"))
+    with pytest.raises(PayloadMismatch):  # replay adds an order id
+        await register_intent(
+            session, redis, OWNER, other, payload(amount="7.00", merchant_order_id="order-A")
+        )
+
+
+async def test_same_key_with_the_same_order_id_is_a_replay(repo, redis, session):
+    first, _ = await register_intent(
+        session, redis, OWNER, KEY, payload(merchant_order_id="order-A")
+    )
+    again, replay = await register_intent(
+        session, redis, OWNER, KEY, payload(merchant_order_id="order-A")
+    )
+    assert replay is True and again["id"] == first["id"]
+    assert first["merchant_order_id"] == "order-A"
+
+
+@pytest.mark.parametrize(
+    "replay_condition",
+    [
+        {"kind": "manual", "description": "Something else"},
+        {"kind": "manual"},
+        None,
+    ],
+    ids=["changed", "reduced", "dropped"],
+)
+async def test_same_key_with_a_different_condition_raises_payload_mismatch(
+    repo, redis, session, replay_condition
+):
+    base = payload(path="CONDITIONALPAY", condition=CONDITION)
+    await register_intent(session, redis, OWNER, KEY, base)
+    with pytest.raises(PayloadMismatch):
+        await register_intent(
+            session, redis, OWNER, KEY, payload(path="CONDITIONALPAY", condition=replay_condition)
+        )
+    assert len(repo.intents) == 1
+
+
+async def test_same_key_with_a_condition_added_raises_payload_mismatch(repo, redis, session):
+    await register_intent(session, redis, OWNER, KEY, payload(path="CONDITIONALPAY"))
+    with pytest.raises(PayloadMismatch):
+        await register_intent(
+            session, redis, OWNER, KEY, payload(path="CONDITIONALPAY", condition=CONDITION)
+        )
+
+
+async def test_same_key_with_the_same_condition_is_a_replay_whatever_the_key_order(
+    repo, redis, session
+):
+    first, _ = await register_intent(
+        session, redis, OWNER, KEY, payload(path="CONDITIONALPAY", condition=CONDITION)
+    )
+    reordered = {"description": "Parcel delivered", "kind": "manual"}
+    again, replay = await register_intent(
+        session, redis, OWNER, KEY, payload(path="CONDITIONALPAY", condition=reordered)
+    )
+    assert replay is True and again["id"] == first["id"]
+
+
+async def test_a_different_description_alone_is_not_a_conflict(repo, redis, session):
+    first, _ = await register_intent(session, redis, OWNER, KEY, payload(description="A"))
+    again, replay = await register_intent(session, redis, OWNER, KEY, payload(description="B"))
+    assert replay is True and again["id"] == first["id"]
+
+
+# --- merchant order ids: separate purchases vs the same purchase -------------------------
+
+
+async def test_different_order_ids_with_the_same_amount_are_separate_purchases(
+    repo, redis, session
+):
+    first, first_replay = await register_intent(
+        session, redis, OWNER, "key-order-0001", payload(merchant_order_id="order-A")
+    )
+    second, second_replay = await register_intent(
+        session, redis, OWNER, "key-order-0002", payload(merchant_order_id="order-B")
+    )
+    assert (first_replay, second_replay) == (False, False)
+    assert first["id"] != second["id"]
+    assert repo.create_calls == 2
+    assert repo.events("DUPLICATE_SUPPRESSED") == []
+
+
+async def test_concurrent_purchases_with_different_order_ids_are_all_created(repo, redis):
+    results = await asyncio.gather(
+        *[
+            register_intent(
+                FakeSession(), redis, OWNER, f"key-legit-{i:04d}",
+                payload(merchant_order_id=f"order-{i}"),
+            )
+            for i in range(10)
+        ]
+    )
+    assert all(replay is False for _, replay in results)
+    assert len(repo.intents) == 10
+
+
+async def test_an_order_id_skips_the_similar_payment_guard(repo, redis, session):
+    repo.add_row(key="earlier-key-01", age_seconds=5)  # open, same buyer/amount/currency
+    intent, replay = await register_intent(
+        session, redis, OWNER, KEY, payload(merchant_order_id="order-A")
+    )
+    assert replay is False
+    assert repo.create_calls == 1
+    assert repo.events("DUPLICATE_SUPPRESSED") == []
+
+
+async def test_same_order_id_with_a_new_key_returns_the_existing_payment(repo, redis, session):
+    first, _ = await register_intent(
+        session, redis, OWNER, "key-order-0001", payload(merchant_order_id="order-A")
+    )
+    again, replay = await register_intent(
+        session, redis, OWNER, "key-order-0002", payload(merchant_order_id="order-A")
+    )
+    assert replay is True
+    assert again["id"] == first["id"]
+    assert len(repo.intents) == 1
+    assert repo.events("DUPLICATE_SUPPRESSED")[0]["evidence"]["reason"] == "same_order"
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [{"amount": "501.00"}, {"currency": "EUR"}, {"path": "CONDITIONALPAY"},
+     {"condition": CONDITION}],
+    ids=["amount", "currency", "path", "condition"],
+)
+async def test_same_order_id_with_conflicting_details_raises_payload_mismatch(
+    repo, redis, session, changes
+):
+    await register_intent(
+        session, redis, OWNER, "key-order-0001", payload(merchant_order_id="order-A")
+    )
+    with pytest.raises(PayloadMismatch):
+        await register_intent(
+            session, redis, OWNER, "key-order-0002",
+            payload(merchant_order_id="order-A", **changes),
+        )
+    assert len(repo.intents) == 1
+
+
+async def test_order_ids_are_per_owner(repo, redis, session):
+    first, _ = await register_intent(
+        session, redis, "buyer-1", KEY, payload(merchant_order_id="order-A")
+    )
+    second, replay = await register_intent(
+        session, redis, "buyer-2", KEY, payload(merchant_order_id="order-A")
+    )
+    assert replay is False and first["id"] != second["id"]
+
+
+async def test_unique_violation_on_the_order_id_is_treated_as_a_replay(repo, redis, session):
+    rival = repo.add_row(key="rival-key-0001", order_id="order-A")
+    del repo.intents[(OWNER, "rival-key-0001")]
+    repo.competitor = rival  # another process wins the race for the same order id
+    intent, replay = await register_intent(
+        session, redis, OWNER, KEY, payload(merchant_order_id="order-A")
+    )
+    assert replay is True
+    assert intent["id"] == rival["id"]
+    assert repo.events("INTENT_CREATED") == []
+    assert repo.events("DUPLICATE_SUPPRESSED")[0]["evidence"]["reason"] == "same_order"
+
+
+async def test_order_id_race_with_different_details_raises_payload_mismatch(
+    repo, redis, session
+):
+    rival = repo.add_row(key="rival-key-0001", order_id="order-A", amount="999.00")
+    del repo.intents[(OWNER, "rival-key-0001")]
+    repo.competitor = rival
+    with pytest.raises(PayloadMismatch):
+        await register_intent(session, redis, OWNER, KEY, payload(merchant_order_id="order-A"))
+
+
+# --- similar-intent guard (callers that give no order id) --------------------------------
 
 
 async def test_similar_open_intent_returns_the_open_one(repo, session):
@@ -387,8 +606,15 @@ async def test_idempotency_key_length_bounds_are_inclusive(repo, redis, session,
         {"description": "d" * 201},
         {"description": 5},
         {"condition": "not-a-dict"},
+        {"condition": {"when": {1, 2}}},
+        {"condition": {"limit": float("nan")}},
+        {"condition": {"at": datetime(2026, 1, 1)}},
         {"merchant_order_id": ""},
+        {"merchant_order_id": "o" * 129},
+        {"merchant_order_id": 42},
     ],
+    ids=["owner-empty", "owner-long", "payload-none", "desc-long", "desc-int", "cond-str",
+         "cond-set", "cond-nan", "cond-datetime", "order-empty", "order-long", "order-int"],
 )
 async def test_other_invalid_input_raises_value_error(repo, redis, session, bad):
     owner = bad.get("owner_id", OWNER)
@@ -401,11 +627,10 @@ async def test_other_invalid_input_raises_value_error(repo, redis, session, bad)
 
 
 async def test_description_and_condition_are_kept_in_the_audit_event(repo, redis, session):
-    condition = {"kind": "manual", "description": "Parcel delivered"}
-    await register_intent(session, redis, OWNER, KEY, payload(condition=condition))
+    await register_intent(session, redis, OWNER, KEY, payload(condition=CONDITION))
     evidence = repo.events("INTENT_CREATED")[0]["evidence"]
     assert evidence["description"] == "Rs 500"
-    assert evidence["condition"] == condition
+    assert evidence["condition"] == CONDITION
     assert evidence["amount"] == "500.00"  # a string, so the JSON column accepts it
 
 
@@ -464,10 +689,12 @@ async def test_lock_is_released_even_when_the_body_raises(redis):
     assert await redis.exists(lock_name(OWNER, KEY)) == 0
 
 
-async def test_register_intent_leaves_no_locks_behind(repo, redis, session):
-    await register_intent(session, redis, OWNER, KEY, payload())
+@pytest.mark.parametrize("order_id", [None, "order-A"], ids=["no-order-id", "order-id"])
+async def test_register_intent_leaves_no_locks_behind(repo, redis, session, order_id):
+    extra = {} if order_id is None else {"merchant_order_id": order_id}
+    await register_intent(session, redis, OWNER, KEY, payload(**extra))
     with pytest.raises(PayloadMismatch):
-        await register_intent(session, redis, OWNER, KEY, payload(amount="1.00"))
+        await register_intent(session, redis, OWNER, KEY, payload(amount="1.00", **extra))
     assert await redis.keys("*") == []
 
 

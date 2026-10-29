@@ -171,3 +171,33 @@ async def add_audit_event(
         )
     )
     await session.flush()
+
+
+async def get_intent_by_order_id(
+    session: AsyncSession, owner_id: str, merchant_order_id: str
+) -> dict[str, Any] | None:
+    """The payment this owner already created for this merchant order id, if any."""
+    result = await session.execute(
+        select(Payment)
+        .where(Payment.merchant_id == owner_id, Payment.merchant_order_id == merchant_order_id)
+        .execution_options(populate_existing=True)
+    )
+    payment = result.scalar_one_or_none()
+    return intent_to_dict(payment) if payment is not None else None
+
+
+async def get_intent_created_evidence(
+    session: AsyncSession, payment_id: str | uuid.UUID
+) -> dict[str, Any] | None:
+    """Evidence stored on the payment's INTENT_CREATED audit event (append-only, so it is
+    the original request: condition, description, ...). None if there is no such event."""
+    result = await session.execute(
+        select(PaymentAudit.evidence)
+        .where(
+            PaymentAudit.payment_id == uuid.UUID(str(payment_id)),
+            PaymentAudit.event_type == "INTENT_CREATED",
+        )
+        .order_by(PaymentAudit.created_at.asc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()

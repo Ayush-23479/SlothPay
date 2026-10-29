@@ -1,3 +1,10 @@
+"""Duplicate protection against REAL PostgreSQL and Redis. Enable with SLOTHPAY_RUN_DB_TESTS=1.
+
+Needs the Compose services running and a migrated database (alembic upgrade head).
+Each test uses a fresh random owner id. The tests commit for real (that is the point), and
+payment_audit is append-only, so the rows they create are left in the disposable local
+database.
+"""
 
 import asyncio
 import os
@@ -165,3 +172,95 @@ async def test_a_closed_payment_does_not_block_a_new_one_with_the_same_amount(in
     second, replay = await call(maker, redis, owner, f"key-{uuid.uuid4().hex}", payload())
     assert replay is False
     assert second["id"] != first["id"]
+
+
+async def test_50_legitimate_purchases_with_different_order_ids_are_all_created(infra):
+    """Same buyer, same amount, same moment, but 50 different orders: none may be merged."""
+    maker, redis = infra
+    owner = f"itest-{uuid.uuid4().hex}"
+    results = await asyncio.gather(
+        *[
+            call(
+                maker, redis, owner, f"key-{uuid.uuid4().hex}",
+                payload(merchant_order_id=f"order-{uuid.uuid4().hex}"),
+            )
+            for _ in range(CONCURRENCY)
+        ]
+    )
+    done, created = summarise(results)
+    assert len(done) == CONCURRENCY, "no purchase was blocked or turned into a replay"
+    assert len(created) == CONCURRENCY
+    assert len({r[0]["id"] for r in done}) == CONCURRENCY
+    assert await count(
+        maker, "SELECT count(*) FROM payments WHERE merchant_id = :o", o=owner
+    ) == CONCURRENCY
+
+
+async def test_50_requests_for_one_order_id_with_different_keys_leave_one_payment(infra):
+    """The order id is the purchase: new keys for the same order must not create a second."""
+    maker, redis = infra
+    owner, order = f"itest-{uuid.uuid4().hex}", f"order-{uuid.uuid4().hex}"
+    results = await asyncio.gather(
+        *[
+            call(maker, redis, owner, f"key-{uuid.uuid4().hex}", payload(merchant_order_id=order))
+            for _ in range(CONCURRENCY)
+        ]
+    )
+    done, created = summarise(results)
+    assert len(done) == CONCURRENCY, "every racer got an answer, none crashed"
+    assert len(created) == 1
+    assert len({r[0]["id"] for r in done}) == 1
+    assert await count(
+        maker,
+        "SELECT count(*) FROM payments WHERE merchant_id = :o AND merchant_order_id = :m",
+        o=owner, m=order,
+    ) == 1
+
+
+async def test_same_key_with_a_different_order_id_is_rejected_by_the_real_database(infra):
+    maker, redis = infra
+    owner, key = f"itest-{uuid.uuid4().hex}", f"key-{uuid.uuid4().hex}"
+    await call(maker, redis, owner, key, payload(merchant_order_id="order-A"))
+    async with maker() as session:
+        with pytest.raises(idempotency.PayloadMismatch):
+            await register_intent(
+                session, redis, owner, key, payload(merchant_order_id="order-B")
+            )
+
+
+async def test_same_order_id_with_a_different_amount_is_rejected_by_the_real_database(infra):
+    maker, redis = infra
+    owner, order = f"itest-{uuid.uuid4().hex}", f"order-{uuid.uuid4().hex}"
+    await call(maker, redis, owner, f"key-{uuid.uuid4().hex}", payload(merchant_order_id=order))
+    async with maker() as session:
+        with pytest.raises(idempotency.PayloadMismatch):
+            await register_intent(
+                session, redis, owner, f"key-{uuid.uuid4().hex}",
+                payload(merchant_order_id=order, amount="501.00"),
+            )
+
+
+async def test_condition_is_compared_after_a_round_trip_through_the_database(infra):
+    maker, redis = infra
+    owner, key = f"itest-{uuid.uuid4().hex}", f"key-{uuid.uuid4().hex}"
+    stored = {"kind": "manual", "description": "Parcel delivered", "tags": ["a", "b"]}
+    first, _ = await call(
+        maker, redis, owner, key, payload(path="CONDITIONALPAY", condition=stored)
+    )
+    # Same condition with the keys in another order: still the same request.
+    reordered = {"tags": ["a", "b"], "description": "Parcel delivered", "kind": "manual"}
+    again, replay = await call(
+        maker, redis, owner, key, payload(path="CONDITIONALPAY", condition=reordered)
+    )
+    assert replay is True and again["id"] == first["id"]
+    # A different condition under the same key is a conflict.
+    for conflicting in (
+        {"kind": "manual", "description": "Something else", "tags": ["a", "b"]},
+        None,
+    ):
+        async with maker() as session:
+            with pytest.raises(idempotency.PayloadMismatch):
+                await register_intent(
+                    session, redis, owner, key,
+                    payload(path="CONDITIONALPAY", condition=conflicting),
+                )
