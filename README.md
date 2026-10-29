@@ -1,82 +1,118 @@
 # SlothPay
 
-AI-powered payment orchestration, conditional payments and safe transaction recovery on top of PayPal (**sandbox only**).
+**Sandbox-only payment orchestration for SmartPay, ConditionalPay, and safer recovery from uncertain provider outcomes.**
 
-SlothPay makes a payment safe even when the internet freezes, the buyer taps twice, or PayPal's answer gets lost. It has two payment paths that never run one after another for the same payment:
+SlothPay is a FastAPI/PostgreSQL application built around the PayPal Sandbox. Its goal is to prevent duplicate financial operations and maintain auditable payment state when requests are repeated, a worker crashes, or the provider's response is ambiguous.
 
-- **SmartPay:** the buyer approves, PayPal captures immediately.
-- **ConditionalPay:** the buyer approves, PayPal authorizes (holds) the money, SlothPay waits for a verified condition, then captures or voids.
+> **Project status:** Active development. Database ledger, payment state rules, PayPal Sandbox gateway, and Task 6 orchestration are implemented and locally tested. Task 5 idempotency review, provider-state reconciliation, full Sandbox acceptance, and further workflow integration remain open. **Not for live payments.**
 
-Duplicate protection has two layers: our own idempotency key, and a stable PayPal-Request-Id so repeating a request returns the original result. SlothPay never blindly retries a charge after a timeout; it asks PayPal what happened first.
+## Payment flows
 
-> Status: foundation only (Task 1). Payment logic is added task by task.
+| Flow | Intended behavior | Current boundary |
+| --- | --- | --- |
+| **SmartPay** | Create a PayPal order, independently verify buyer approval, then capture | Orchestration and internal API implemented; end-to-end Sandbox verification pending |
+| **ConditionalPay** | Create an authorization order, verify approval, authorize, then capture or void when the applicable condition is trusted | Authorization and guarded operations implemented; HTTP condition-based capture remains blocked pending trusted condition evaluation |
 
-## Prerequisites
+## Safety model
 
-- Python 3.12
-- Node.js (current LTS) and npm
-- Docker Desktop (for PostgreSQL, Redis and Temporal)
-- A free PayPal developer account with a sandbox app (developer.paypal.com)
+- **PayPal Sandbox only.** The gateway is designed for the sandbox endpoint, not live financial transactions.
+- **Durable operation attempts.** A `PaymentAttempt` and an exclusive payment-state claim are committed before financial operations are sent to PayPal.
+- **Concurrency control.** PostgreSQL compare-and-swap state transitions and unique request IDs help ensure competing operations cannot both execute.
+- **Evidence-backed approval.** Buyer approval comes from PayPal's order details, not a frontend flag.
+- **No blind charge retries.** `STARTED`, `NOT_SENT`, or `UNCERTAIN` attempts require investigation and provider-state reconciliation before any further action.
+- **Append-only audit history.** Database-side protection prevents normal UPDATE and DELETE against the payment audit ledger.
+- **Limited internal API.** Existing Task 6 endpoints are admin-only development endpoints; they do not provide merchant authentication or a public production-ready API.
 
-## Quick start (backend, no Docker)
+**Important:** Stable request-ID behavior is currently implemented within the orchestration layer; the final Task 5 duplicate-protection contract is still under review. Do not change request IDs associated with previously recorded attempts.
 
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements-dev.txt
-cp .env.example .env          # then edit .env
-python -m pytest
-uvicorn backend.main:app --reload
-# in another terminal:
-curl http://localhost:8000/health
+## Tech stack
+
+- **Backend:** Python 3.12, FastAPI, SQLAlchemy async, Alembic
+- **Data stores:** PostgreSQL 16, Redis 7
+- **Payment provider:** PayPal REST APIs (Sandbox)
+- **Frontend:** Next.js
+- **Planned / in-progress:** Temporal workflows, trusted condition verification, webhooks, reconciliation and AI-assisted analysis
+- **Testing:** pytest, pytest-asyncio, Ruff
+
+## Local setup (Windows PowerShell)
+
+Prerequisites: Python 3.12, Docker Desktop, Node.js/npm, and (for PayPal API calls) PayPal Sandbox app credentials.
+
+```powershell
+# From the repository root
+py -3.12 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+Copy-Item .env.example .env    # edit .env locally; never commit it
+
+docker compose up -d postgres redis
+.\.venv\Scripts\python.exe -m alembic upgrade head
+
+# Run backend in another terminal
+.\.venv\Scripts\python.exe -m uvicorn backend.main:app --reload
 ```
 
-## Run the whole local stack with Docker Compose
+The health endpoint is `http://localhost:8000/health`. Your `.env` must use the local sandbox configuration. The admin-only Task 6 routes additionally require a strong, private `ADMIN_API_KEY`. Keep these routes on a private network.
 
-```bash
-cp .env.example .env
-docker compose up -d --build
-docker compose ps
-curl http://localhost:8000/health
-```
+Start the frontend separately:
 
-Services: PostgreSQL 16 (5432), Redis 7 (6379), Temporal dev server (7233, UI on 8233), API (8000).
-
-## Frontend
-
-```bash
-cd frontend
+```powershell
+Set-Location frontend
 npm install
-npm run build
-npm run dev      # http://localhost:3000
+npm run dev
 ```
 
-## Folder map
+Open `http://localhost:3000`.
 
-| Folder | Purpose |
+## Tests
+
+Run integration tests **only against a disposable, migrated local PostgreSQL database**. Some integration tests commit rows and do not clean them up automatically.
+
+```powershell
+$env:SLOTHPAY_RUN_DB_TESTS = "1"
+.\.venv\Scripts\python.exe -m pytest -q -rs tests/unit tests/integration
+.\.venv\Scripts\python.exe -m ruff check backend tests
+Remove-Item Env:SLOTHPAY_RUN_DB_TESTS -ErrorAction SilentlyContinue
+```
+
+**Last verified result (Task 6 branch, October 2026):** 241 unit/integration tests passed with one third-party Starlette deprecation warning; Ruff passed. This result does not establish live PayPal Sandbox end-to-end acceptance.
+
+## Repository layout
+
+| Path | Responsibility |
 | --- | --- |
-| backend/config | Settings and configuration |
-| backend/models | Database models and repository (Task 2) |
-| backend/state_machine | Payment states and rules (Task 3) |
-| backend/payments | PayPal gateway (Task 4) |
-| backend/reliability | Duplicate protection, reconciliation, rescue (Tasks 5, 8, 12) |
-| backend/orchestration | SmartPay and ConditionalPay flows (Task 6) |
-| backend/webhooks | PayPal webhooks (Task 7) |
-| backend/workflows | Temporal workflows (Task 9) |
-| backend/api | HTTP routes (Task 10) |
-| backend/notifications | Live updates over SSE (Task 10) |
-| backend/intelligence | AI analysis with fallbacks (Task 11) |
-| database | Migrations and SQL views |
-| frontend | Next.js dashboard and Trust Passport |
-| tests | Unit, integration and end-to-end tests |
-| docs | Architecture and submission docs |
+| `backend/config` | Environment-based settings and sandbox safeguards |
+| `backend/models` | Payments, operation attempts, provider events, and audit ledger |
+| `backend/state_machine` | States, policy rules, and transition guards |
+| `backend/payments` | Low-level PayPal Sandbox client |
+| `backend/orchestration` | SmartPay, ConditionalPay, claims, lifecycle, and recovery inspection |
+| `backend/api` | Internal HTTP endpoints |
+| `backend/webhooks` | PayPal webhook handling (on its dedicated feature branch until merged) |
+| `backend/reliability` | Idempotency and reconciliation work |
+| `backend/workflows` | Planned Temporal workflows |
+| `database` | Alembic migrations and SQL |
+| `frontend` | Next.js application |
+| `tests` | Unit and PostgreSQL integration tests |
 
-## Safety notes
+## Development progress
 
-- PayPal sandbox only. The app refuses to start in demo or production mode with a non-sandbox PayPal URL.
-- Never commit secrets. Only `.env.example` is committed.
-- Controlled-failure tools (chaos) are off by default.
+| Area | Status |
+| --- | --- |
+| Payment ledger and migrations | Implemented and tested |
+| State transition rules | Implemented and tested |
+| PayPal Sandbox API client | Implemented with offline tests |
+| SmartPay / ConditionalPay lifecycle | Implemented and locally tested |
+| Task 6 internal operations API | Implemented with unit tests |
+| PostgreSQL concurrency and no-replay tests | Passing |
+| Recovery inspection of unresolved attempts | Read-only implementation tested |
+| Task 5 final idempotency integration | Pending review |
+| Provider-state reconciliation and release of stuck operations | Pending |
+| Trusted conditional settlement workflow | Pending |
+| Real Sandbox end-to-end acceptance | Pending |
+
+## Security and operational limits
+
+This repository is **not a production payment service**. Never commit `.env`, PayPal credentials, access tokens, or admin keys. Never expose internal admin endpoints directly to the public internet. Do not automatically retry an ambiguous capture or assume that a local timeout means PayPal did not process it. Preserve historical payment-attempt IDs and audit records during future integrations.
 
 ## License
 
-MIT, see [LICENSE](LICENSE).
+See [LICENSE](LICENSE), if present in the repository.
