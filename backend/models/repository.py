@@ -12,9 +12,11 @@ from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .audit import PaymentAudit
+from .event import ProviderEvent
 from .payment import Payment
 
 
@@ -199,5 +201,36 @@ async def get_intent_created_evidence(
         )
         .order_by(PaymentAudit.created_at.asc())
         .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+async def record_provider_event_once(
+    session: AsyncSession,
+    *,
+    event_id: str,
+    event_type: str,
+    verified: bool,
+    payload: dict[str, Any],
+    provider: str = "paypal",
+    verify_ms: int | None = None,
+) -> uuid.UUID | None:
+    """Insert one provider event. Returns its row id, or None if (provider, event_id) exists.
+
+    The UNIQUE constraint is the dedupe: concurrent duplicates wait for the first insert
+    and then get None. The caller commits.
+    """
+    result = await session.execute(
+        pg_insert(ProviderEvent)
+        .values(
+            provider=provider,
+            event_id=event_id,
+            event_type=event_type,
+            verified=verified,
+            payload=payload,
+            verify_ms=verify_ms,
+        )
+        .on_conflict_do_nothing(index_elements=["provider", "event_id"])
+        .returning(ProviderEvent.id)
     )
     return result.scalar_one_or_none()
