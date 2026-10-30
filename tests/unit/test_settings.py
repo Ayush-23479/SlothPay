@@ -41,6 +41,18 @@ def test_local_may_use_any_url_without_refusing():
     assert make(ENV="local", PAYPAL_BASE_URL="https://example.test").ENV == "local"
 
 
+def test_reconciliation_delays_must_be_finite_positive_and_increasing():
+    assert make().reconciliation_delays_seconds == (0.3, 1.0, 2.0, 4.0, 8.0)
+    for delays in (
+        "0.3,1,2,4,0",
+        "0.3,1,1,4,8",
+        "0.3,1,2,4,nan",
+        "0.3,1,2,4,inf",
+    ):
+        with pytest.raises(ValidationError):
+            make(RECONCILIATION_DELAYS_SECONDS=delays)
+
+
 def test_currency_allowlist_is_parsed_and_uppercased():
     assert make(ALLOWED_CURRENCIES="usd, eur ,inr").currency_allowlist == ["USD", "EUR", "INR"]
 

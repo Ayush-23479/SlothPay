@@ -23,6 +23,11 @@ from backend.orchestration.lifecycle import (
     execute_operation,
     verify_buyer_approval,
 )
+from backend.orchestration.recovery import (
+    RescueActionNotAllowed,
+    execute_rescue_action,
+    get_rescue_plan,
+)
 from backend.payments.paypal_client import (
     PayPalClient,
     PayPalError,
@@ -37,6 +42,28 @@ class OperationResult(BaseModel):
     state: str
     needs_reconciliation: bool = False
     paypal_order_id: str | None = None
+
+
+class RescuePlanResponse(BaseModel):
+    payment_id: str
+    payment_state: str
+    buyer_facing_state: str
+    allowed_actions: list[str]
+    recommended_action: str
+    evidence_reason: str
+
+
+class RescueActionRequest(BaseModel):
+    action: Literal[
+        "WAIT",
+        "RECONCILE",
+        "RETRY_SAME_REQUEST",
+        "CAPTURE",
+        "VOID",
+        "ASK_BUYER_TO_APPROVE",
+        "ASK_BUYER_NEW_METHOD",
+        "CONTACT_SUPPORT",
+    ]
 
 
 async def get_session() -> AsyncIterator[AsyncSession]:
@@ -142,3 +169,42 @@ async def run_payment_operation(
         payment_id=payment_id,
         operation=operation,
     )
+
+
+@router.get("/{payment_id}/rescue-plan", response_model=RescuePlanResponse)
+async def payment_rescue_plan(
+    payment_id: uuid.UUID, _admin: Admin, session: Session
+) -> RescuePlanResponse:
+    try:
+        return RescuePlanResponse(
+            **await get_rescue_plan(session, payment_id=payment_id)
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="Payment not found") from exc
+
+
+@router.post("/{payment_id}/rescue-action")
+async def run_rescue_action(
+    payment_id: uuid.UUID,
+    request: RescueActionRequest,
+    _admin: Admin,
+    session: Session,
+    paypal: Gateway,
+) -> dict:
+    try:
+        return await execute_rescue_action(
+            session,
+            paypal,
+            payment_id=payment_id,
+            action=request.action,
+            actor="admin",
+        )
+    except RescueActionNotAllowed as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="Payment not found") from exc
+    except (PayPalNotSent, PayPalOutcomeUnknown, PayPalError) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Payment operation needs reconciliation; no automatic retry was made",
+        ) from exc
