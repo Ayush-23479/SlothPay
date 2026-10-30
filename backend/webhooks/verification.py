@@ -5,8 +5,8 @@ No webhook event is trusted based on headers or payload alone.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
-from typing import Any
 
 import httpx
 
@@ -28,7 +28,7 @@ class WebhookVerificationUnavailable(Exception):
 
 async def verify_paypal_webhook(
     headers: Mapping[str, str],
-    event: dict[str, Any],
+    raw_body: bytes,
     *,
     http: httpx.AsyncClient | None = None,
 ) -> bool:
@@ -45,6 +45,10 @@ async def verify_paypal_webhook(
         raise WebhookVerificationUnavailable("PayPal webhook verification is not configured")
     if settings.PAYPAL_BASE_URL.rstrip("/") != SANDBOX_BASE_URL:
         raise WebhookVerificationUnavailable("Only the PayPal Sandbox host is allowed")
+    try:
+        event = json.loads(raw_body)
+    except (ValueError, UnicodeDecodeError):
+        return False
     normalized = {str(k).lower(): str(v) for k, v in headers.items()}
     fields = {}
     for header, name in HEADERS.items():

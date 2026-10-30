@@ -14,7 +14,7 @@ from backend.webhooks.events_map import (
     extract_resource_id,
     mask_payload,
 )
-from backend.webhooks.handler import WebhookDeps
+from backend.webhooks.handler import APPLIED, REJECTED, VERIFICATION_UNAVAILABLE, WebhookDeps
 from backend.webhooks.verification import (
     WebhookVerificationUnavailable,
     verify_paypal_webhook,
@@ -27,7 +27,7 @@ HEADERS = {
     "PAYPAL-TRANSMISSION-SIG": "signed",
     "PAYPAL-TRANSMISSION-TIME": "2026-10-29T00:00:00Z",
 }
-# Deliberately odd spacing and key order: the bytes PayPal signed must reach PayPal as-is.
+# Deliberately odd spacing and key order: the receiver must preserve these exact bytes.
 RAW = b'{ "id":"WH-1",  "event_type":"PAYMENT.CAPTURE.COMPLETED", "resource":{"id":"CAP-1"} }'
 
 
@@ -46,7 +46,7 @@ def mock_paypal(status="SUCCESS", seen=None):
             return httpx.Response(200, json={"access_token": "tok"})
         if req.url.path == "/v1/notifications/verify-webhook-signature":
             if seen is not None:
-                seen.append(req.content)
+                seen.append((req.content, req.headers.get("authorization")))
             return httpx.Response(200, json={"verification_status": status})
         raise AssertionError(req.url.path)
 
@@ -56,16 +56,16 @@ def mock_paypal(status="SUCCESS", seen=None):
 
 
 # ----------------------------------------------------------------- verification
-async def test_the_raw_bytes_are_what_gets_verified():
-    seen: list[bytes] = []
+async def test_raw_body_is_parsed_for_paypal_verification():
+    seen: list[tuple[bytes, str | None]] = []
     async with mock_paypal(seen=seen) as client:
         assert await verify_paypal_webhook(HEADERS, RAW, http=client)
-    sent = seen[0]
-    assert RAW in sent, "the exact signed bytes (odd spacing included) reach PayPal"
+    sent, authorization = seen[0]
     body = json.loads(sent)
     assert body["webhook_id"] == "test-webhook"
     assert body["transmission_id"] == "abc"
-    assert body["webhook_event"]["id"] == "WH-1"
+    assert body["webhook_event"] == json.loads(RAW)
+    assert authorization == "Bearer tok"
 
 
 async def test_failure_status_is_not_verified():
@@ -175,7 +175,7 @@ def client_and_calls(monkeypatch):
 
     async def fake_process(headers, raw, deps):
         calls.append((headers, raw))
-        return "rejected"
+        return APPLIED
 
     monkeypatch.setattr(receiver, "process_webhook", fake_process)
     app = FastAPI()
@@ -186,7 +186,7 @@ def client_and_calls(monkeypatch):
     return TestClient(app), calls
 
 
-def test_receiver_answers_200_and_passes_the_request_bytes_and_headers(client_and_calls):
+def test_receiver_answers_200_and_passes_the_exact_request_bytes_and_headers(client_and_calls):
     client, calls = client_and_calls
     response = client.post("/webhooks/paypal", content=RAW, headers=HEADERS)
     assert response.status_code == 200
@@ -195,20 +195,37 @@ def test_receiver_answers_200_and_passes_the_request_bytes_and_headers(client_an
     assert calls[0][0]["paypal-transmission-id"] == "abc"
 
 
-def test_receiver_returns_200_even_when_processing_rejects_or_crashes(monkeypatch):
+def test_receiver_rejects_an_invalid_signature(client_and_calls, monkeypatch):
+    async def reject(headers, raw, deps):
+        return REJECTED
+
+    monkeypatch.setattr(receiver, "process_webhook", reject)
+    client, _ = client_and_calls
+    response = client.post("/webhooks/paypal", content=RAW, headers=HEADERS)
+    assert response.status_code == 401
+
+
+def test_receiver_returns_retryable_status_when_verification_is_unavailable(
+    client_and_calls, monkeypatch
+):
+    async def unavailable(headers, raw, deps):
+        return VERIFICATION_UNAVAILABLE
+
+    monkeypatch.setattr(receiver, "process_webhook", unavailable)
+    client, _ = client_and_calls
+    response = client.post("/webhooks/paypal", content=RAW, headers=HEADERS)
+    assert response.status_code == 503
+
+
+def test_receiver_returns_retryable_status_when_processing_crashes(client_and_calls, monkeypatch):
     async def boom(headers, raw, deps):
         raise RuntimeError("database down")
 
     monkeypatch.setattr(receiver, "process_webhook", boom)
-    app = FastAPI()
-    app.include_router(receiver.router)
-    app.dependency_overrides[receiver.get_webhook_deps] = lambda: WebhookDeps(
-        session_factory=lambda: None
-    )
-    client = TestClient(app)
+    client, _ = client_and_calls
     response = client.post("/webhooks/paypal", content=b"garbage", headers={})
-    assert response.status_code == 200
-    assert "verif" not in response.text.lower(), "never explains a verification failure"
+    assert response.status_code == 503
+    assert "database down" not in response.text
 
 
 def test_receiver_refuses_an_oversized_body(client_and_calls):
