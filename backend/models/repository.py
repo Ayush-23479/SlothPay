@@ -1,15 +1,14 @@
-"""Concurrency-safe state transition helper.
-
-Provider response handling must reconcile PayPal status independently; this method
-only persists a *validated* application-level transition.
-"""
-
 import uuid
+from datetime import datetime
+from decimal import Decimal
+from typing import Any
 
-from sqlalchemy import update
+from sqlalchemy import select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .audit import PaymentAudit
+from .event import ProviderEvent
 from .payment import Payment
 
 
@@ -56,3 +55,174 @@ async def transition_payment(
     )
     await session.flush()
     return version
+
+
+# --- intent helpers (Task 5) -------------------------------------------------------------
+# A "payment intent" is one row of `payments`. These helpers return plain dicts so callers
+# never hold ORM objects. Column names are mapped to the names used across the project:
+#   merchant_id -> owner_id, intent_key -> idempotency_key, mode -> path.
+
+
+def intent_to_dict(payment: Payment) -> dict[str, Any]:
+    return {
+        "id": str(payment.id),
+        "owner_id": payment.merchant_id,
+        "idempotency_key": payment.intent_key,
+        "merchant_order_id": payment.merchant_order_id,
+        "path": payment.mode,
+        "amount": payment.amount,
+        "currency": payment.currency,
+        "status": payment.status,
+        "version": payment.version,
+        "created_at": payment.created_at,
+    }
+
+
+async def get_intent_by_key(
+    session: AsyncSession, owner_id: str, idempotency_key: str
+) -> dict[str, Any] | None:
+    result = await session.execute(
+        select(Payment)
+        .where(Payment.merchant_id == owner_id, Payment.intent_key == idempotency_key)
+        .execution_options(populate_existing=True)
+    )
+    payment = result.scalar_one_or_none()
+    return intent_to_dict(payment) if payment is not None else None
+
+
+async def create_intent(
+    session: AsyncSession,
+    *,
+    owner_id: str,
+    idempotency_key: str,
+    merchant_order_id: str,
+    path: str,
+    amount: Decimal,
+    currency: str,
+) -> dict[str, Any]:
+    """Insert one payment. Raises sqlalchemy IntegrityError on a duplicate key/order id."""
+    payment = Payment(
+        merchant_id=owner_id,
+        merchant_order_id=merchant_order_id,
+        intent_key=idempotency_key,
+        amount=amount,
+        currency=currency,
+        mode=path,
+        status="CREATED",
+        version=0,
+    )
+    session.add(payment)
+    await session.flush()
+    # Load server-generated columns (created_at) now; async sessions cannot lazy-load later.
+    await session.refresh(payment)
+    return intent_to_dict(payment)
+
+
+async def find_recent_intents(
+    session: AsyncSession,
+    *,
+    owner_id: str,
+    amount: Decimal,
+    currency: str,
+    since: datetime,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    """Newest-first payments for this owner, amount and currency created at or after `since`."""
+    result = await session.execute(
+        select(Payment)
+        .where(
+            Payment.merchant_id == owner_id,
+            Payment.amount == amount,
+            Payment.currency == currency,
+            Payment.created_at >= since,
+        )
+        .order_by(Payment.created_at.desc(), Payment.id.desc())
+        .limit(limit)
+        .execution_options(populate_existing=True)
+    )
+    return [intent_to_dict(payment) for payment in result.scalars().all()]
+
+
+async def add_audit_event(
+    session: AsyncSession,
+    *,
+    payment_id: str | uuid.UUID,
+    event_type: str,
+    actor: str,
+    evidence: dict[str, Any],
+    from_state: str | None = None,
+    to_state: str | None = None,
+) -> None:
+    """Append one audit row (the database blocks any later UPDATE or DELETE)."""
+    session.add(
+        PaymentAudit(
+            payment_id=uuid.UUID(str(payment_id)),
+            event_type=event_type,
+            from_state=from_state,
+            to_state=to_state,
+            actor=actor,
+            evidence=evidence,
+        )
+    )
+    await session.flush()
+
+
+async def get_intent_by_order_id(
+    session: AsyncSession, owner_id: str, merchant_order_id: str
+) -> dict[str, Any] | None:
+    """The payment this owner already created for this merchant order id, if any."""
+    result = await session.execute(
+        select(Payment)
+        .where(Payment.merchant_id == owner_id, Payment.merchant_order_id == merchant_order_id)
+        .execution_options(populate_existing=True)
+    )
+    payment = result.scalar_one_or_none()
+    return intent_to_dict(payment) if payment is not None else None
+
+
+async def get_intent_created_evidence(
+    session: AsyncSession, payment_id: str | uuid.UUID
+) -> dict[str, Any] | None:
+    """Evidence stored on the payment's INTENT_CREATED audit event (append-only, so it is
+    the original request: condition, description, ...). None if there is no such event."""
+    result = await session.execute(
+        select(PaymentAudit.evidence)
+        .where(
+            PaymentAudit.payment_id == uuid.UUID(str(payment_id)),
+            PaymentAudit.event_type == "INTENT_CREATED",
+        )
+        .order_by(PaymentAudit.created_at.asc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+async def record_provider_event_once(
+    session: AsyncSession,
+    *,
+    event_id: str,
+    event_type: str,
+    verified: bool,
+    payload: dict[str, Any],
+    provider: str = "paypal",
+    verify_ms: int | None = None,
+) -> uuid.UUID | None:
+    """Insert one provider event. Returns its row id, or None if (provider, event_id) exists.
+
+    The UNIQUE constraint is the dedupe: concurrent duplicates wait for the first insert
+    and then get None. The caller commits.
+    """
+    result = await session.execute(
+        pg_insert(ProviderEvent)
+        .values(
+            provider=provider,
+            event_id=event_id,
+            event_type=event_type,
+            verified=verified,
+            payload=payload,
+            verify_ms=verify_ms,
+        )
+        .on_conflict_do_nothing(index_elements=["provider", "event_id"])
+        .returning(ProviderEvent.id)
+    )
+    return result.scalar_one_or_none()
