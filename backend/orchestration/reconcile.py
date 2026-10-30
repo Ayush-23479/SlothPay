@@ -721,6 +721,7 @@ async def process_due_reconciliations(
             )
             .order_by(PaymentReconciliation.next_check_at, PaymentReconciliation.attempt_id)
             .limit(limit)
+            .with_for_update(skip_locked=True, of=PaymentReconciliation)
         )
     )
     return [

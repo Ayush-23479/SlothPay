@@ -96,6 +96,7 @@ async def add_attempt(maker, payment_id, operation, status, *, provider_operatio
 
 def gateway():
     return SimpleNamespace(
+        get_order=AsyncMock(return_value=None),
         create_order=AsyncMock(
             return_value={"id": f"ORDER-{uuid.uuid4().hex}", "status": "CREATED"}
         ),
@@ -262,8 +263,9 @@ async def test_lost_capture_response_reconciles_to_captured_without_second_captu
         results = await process_due_reconciliations(
             session, paypal, now=datetime.now(UTC) + timedelta(seconds=2)
         )
-    assert len(results) == 1
-    assert results[0].decision == "EVIDENCE_APPLIED"
+    own_results = [item for item in results if item.payment_id == str(payment_id)]
+    assert len(own_results) == 1
+    assert own_results[0].decision == "EVIDENCE_APPLIED"
     paypal.capture_order.assert_awaited_once()
 
     async with maker() as session:
@@ -275,9 +277,7 @@ async def test_lost_capture_response_reconciles_to_captured_without_second_captu
             )
         )
         audit = list(
-            await session.scalars(
-                select(PaymentAudit).where(PaymentAudit.payment_id == payment_id)
-            )
+            await session.scalars(select(PaymentAudit).where(PaymentAudit.payment_id == payment_id))
         )
     assert payment.status == "CAPTURED"
     assert attempt.status == "SUCCEEDED" and attempt.provider_operation_id == "CAP-TASK8"
@@ -326,11 +326,13 @@ async def test_not_sent_operation_is_not_replayed_automatically_and_can_use_same
             action="RETRY_SAME_REQUEST",
         )
     assert result["result"]["state"] == "ORDER_CREATED"
-    paypal.create_order.assert_awaited_once()
+    assert paypal.create_order.await_count == 2
     first_request_id = paypal.create_order.await_args_list[0].kwargs["request_id"]
     retry_request_id = paypal.create_order.await_args_list[1].kwargs["request_id"]
-    assert retry_request_id == first_request_id == stable_operation_request_id(
-        payment_id, "create_order"
+    assert (
+        retry_request_id
+        == first_request_id
+        == stable_operation_request_id(payment_id, "create_order")
     )
 
 
@@ -357,8 +359,8 @@ async def test_five_lookup_timeouts_end_in_action_needed_without_marking_failure
                 session, paypal, attempt_id=attempt_id, force=True
             )
     assert observation.decision == "EXHAUSTED"
-    paypal.get_order.assert_awaited_once_with(order_id)
     assert paypal.get_order.await_count == 5
+    assert all(args.args == (order_id,) for args in paypal.get_order.await_args_list)
 
     async with maker() as session:
         payment = await session.get(Payment, payment_id)
@@ -478,9 +480,7 @@ async def test_verified_webhook_winning_during_lookup_blocks_stale_reconciliatio
 
     paypal.get_order = AsyncMock(side_effect=webhook_then_stale_order)
     async with maker() as session:
-        observation = await reconcile_attempt(
-            session, paypal, attempt_id=attempt_id, force=True
-        )
+        observation = await reconcile_attempt(session, paypal, attempt_id=attempt_id, force=True)
     async with maker() as session:
         payment = await session.get(Payment, payment_id)
         attempt = await session.get(PaymentAttempt, attempt_id)
@@ -499,6 +499,7 @@ async def test_unverified_webhook_and_forbidden_action_cannot_authorize_retry(ma
         "event_type": "PAYMENT.CAPTURE.COMPLETED",
         "resource": {"id": "CAP-FORGED", "status": "COMPLETED"},
     }
+
     async def verify(_headers, _raw):
         return False
 
@@ -525,7 +526,10 @@ async def test_unverified_webhook_and_forbidden_action_cannot_authorize_retry(ma
 
 async def test_stale_not_occurred_evidence_cannot_authorize_void_retry(maker):
     payment_id = await seed(
-        maker, status="AWAITING_CONDITION", mode="CONDITIONALPAY", order_id="ORDER-VOID"
+        maker,
+        status="AWAITING_CONDITION",
+        mode="CONDITIONALPAY",
+        order_id=f"ORDER-{uuid.uuid4().hex}",
     )
     await add_attempt(
         maker, payment_id, "authorize", "SUCCEEDED", provider_operation_id="AUTH-VOID"
@@ -583,9 +587,7 @@ async def test_final_payment_state_is_not_reopened_by_reconciliation(maker):
     paypal.get_order = AsyncMock(return_value=completed_order(order_id, capture_status="PENDING"))
 
     async with maker() as session:
-        observation = await reconcile_attempt(
-            session, paypal, attempt_id=attempt_id, force=True
-        )
+        observation = await reconcile_attempt(session, paypal, attempt_id=attempt_id, force=True)
         payment = await session.get(Payment, payment_id)
     assert observation.decision == "FINAL_STATE"
     assert payment.status == "CAPTURED"
