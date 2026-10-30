@@ -1,3 +1,11 @@
+"""Payment repository: concurrency-safe state transitions and intent read/write helpers.
+
+Provider response handling must reconcile PayPal status independently; transition_payment
+only persists a *validated* application-level transition. The intent helpers below are the
+only place Task 5 (duplicate protection) touches the payments table, so nobody else needs
+raw database commands.
+"""
+
 import uuid
 from datetime import datetime
 from decimal import Decimal

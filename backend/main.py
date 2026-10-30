@@ -3,9 +3,15 @@
 Run:
     uvicorn backend.main:app --reload
 """
+"""SlothPay API entry point.
+
+Run:
+    uvicorn backend.main:app --reload
+"""
 
 from fastapi import FastAPI
 
+from backend.api.payment_operations import router as payment_operations_router
 from backend.api.payment_operations import router as payment_operations_router
 from backend.config.settings import get_settings
 from backend.webhooks.receiver import router as paypal_webhook_router
@@ -24,6 +30,10 @@ def create_app() -> FastAPI:
 
     @app.get("/health")
     def health() -> dict:
+        return {
+            "status": "ok",
+            "env": settings.ENV,
+        }
         return {
             "status": "ok",
             "env": settings.ENV,
