@@ -9,15 +9,19 @@ from __future__ import annotations
 
 import hashlib
 import uuid
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.config.settings import get_settings
 from backend.models.attempt import PaymentAttempt
 from backend.models.payment import Payment
-from backend.models.repository import StalePaymentVersion, transition_payment
+from backend.models.reconciliation import PaymentReconciliation
+from backend.models.repository import StalePaymentVersion, add_audit_event, transition_payment
 from backend.payments.paypal_client import PayPalError, PayPalNotSent, PayPalOutcomeUnknown
 from backend.state_machine.guards import authorization_capturable, claim_status_for
 from backend.state_machine.transitions import validate_transition
@@ -103,10 +107,29 @@ async def _attempt(
                 session,
                 payment,
                 claim_status,
-                evidence={"operation": operation, "request_id": request_id, "phase": "claimed"},
+                evidence={
+                    "source": "internal_record",
+                    "confirmed": False,
+                    "operation": operation,
+                    "request_id": request_id,
+                    "phase": "claimed",
+                },
             )
         session.add(attempt)
         await session.flush()
+        await _schedule_reconciliation(session, payment, attempt)
+        await add_audit_event(
+            session,
+            payment_id=payment.id,
+            event_type="OPERATION_ATTEMPT_STARTED",
+            actor="orchestration",
+            evidence={
+                "source": "internal_record",
+                "confirmed": False,
+                "operation": operation,
+                "request_id": request_id,
+            },
+        )
         await session.commit()
     except (IntegrityError, StalePaymentVersion) as exc:
         await session.rollback()
@@ -122,6 +145,7 @@ async def _record(
     status: str,
     *,
     provider_operation_id: str | None = None,
+    reason: str | None = None,
 ) -> None:
     attempt = await session.get(PaymentAttempt, attempt_id)
     if attempt is None:
@@ -129,7 +153,59 @@ async def _record(
     attempt.status = status
     if provider_operation_id:
         attempt.provider_operation_id = provider_operation_id
+    if status == "NOT_SENT":
+        await _complete_reconciliation(session, attempt_id, "PayPal operation was not sent")
+        await add_audit_event(
+            session,
+            payment_id=attempt.payment_id,
+            event_type="PROVIDER_OPERATION_NOT_SENT",
+            actor="orchestration",
+            evidence={
+                "source": "internal_client",
+                "confirmed": False,
+                "operation": attempt.operation,
+                "request_id": attempt.request_id,
+                "reason": reason or "request_not_sent",
+            },
+        )
     await session.commit()
+
+
+async def _schedule_reconciliation(
+    session: AsyncSession, payment: Payment, attempt: PaymentAttempt
+) -> None:
+    now = datetime.now(UTC)
+    next_check = now + timedelta(seconds=get_settings().reconciliation_delays_seconds[0])
+    stmt = (
+        insert(PaymentReconciliation)
+        .values(
+            attempt_id=attempt.id,
+            payment_id=payment.id,
+            check_count=0,
+            next_check_at=next_check,
+        )
+        .on_conflict_do_update(
+            index_elements=[PaymentReconciliation.attempt_id],
+            set_={
+                "check_count": 0,
+                "next_check_at": next_check,
+                "completed_at": None,
+                "last_reason": None,
+                "updated_at": now,
+            },
+            where=PaymentReconciliation.completed_at.is_not(None),
+        )
+    )
+    await session.execute(stmt)
+
+
+async def _complete_reconciliation(
+    session: AsyncSession, attempt_id: uuid.UUID, reason: str
+) -> None:
+    schedule = await session.get(PaymentReconciliation, attempt_id)
+    if schedule is not None:
+        schedule.completed_at = datetime.now(UTC)
+        schedule.last_reason = reason[:160]
 
 
 async def _uncertain(
@@ -143,13 +219,34 @@ async def _uncertain(
     if attempt is None:
         raise LifecycleSafetyError("Committed attempt row was not found")
     attempt.status = "UNCERTAIN"
+    await add_audit_event(
+        session,
+        payment_id=payment.id,
+        event_type="PROVIDER_OPERATION_OUTCOME_UNKNOWN",
+        actor="orchestration",
+        evidence={
+            "source": "internal_client",
+            "confirmed": False,
+            "operation": operation,
+            "request_id": attempt.request_id,
+            "reason": reason,
+        },
+    )
     if payment.status != "UNCERTAIN":
         await _transition(
             session,
             payment,
             "UNCERTAIN",
-            evidence={"operation": operation, "phase": "uncertain", "reason": reason},
+            evidence={
+                "source": "internal_client",
+                "confirmed": False,
+                "operation": operation,
+                "request_id": attempt.request_id,
+                "phase": "uncertain",
+                "reason": reason,
+            },
         )
+    await _schedule_reconciliation(session, payment, attempt)
     await session.commit()
 
 
@@ -219,7 +316,7 @@ async def create_order(
             request_id=request_id,
         )
     except PayPalNotSent:
-        await _record(session, attempt_id, "NOT_SENT")
+        await _record(session, attempt_id, "NOT_SENT", reason="paypal_operation_not_sent")
         raise
     except (PayPalOutcomeUnknown, PayPalError) as exc:
         await _uncertain(session, payment, attempt_id, "create_order", type(exc).__name__)
@@ -237,11 +334,18 @@ async def create_order(
         session,
         payment,
         "ORDER_CREATED",
-        evidence={"operation": "create_order", "order_id": order_id},
+        evidence={
+            "source": "paypal_response",
+            "confirmed": True,
+            "operation": "create_order",
+            "request_id": request_id,
+            "order_id": order_id,
+        },
     )
     attempt = await session.get(PaymentAttempt, attempt_id)
     attempt.status = "SUCCEEDED"
     attempt.provider_operation_id = order_id
+    await _complete_reconciliation(session, attempt_id, "PayPal order creation confirmed")
     await session.commit()
     return {"state": "ORDER_CREATED", "paypal_order_id": order_id, "response": response}
 
@@ -272,7 +376,12 @@ async def verify_buyer_approval(
         session,
         payment,
         "APPROVED",
-        evidence={"phase": "approved", "paypal_order_id": payment.paypal_order_id},
+        evidence={
+            "source": "paypal_get",
+            "confirmed": True,
+            "phase": "approved",
+            "paypal_order_id": payment.paypal_order_id,
+        },
     )
     await session.commit()
     return {"state": "APPROVED"}
@@ -332,7 +441,7 @@ async def execute_operation(
         else:
             response = await paypal.capture_authorization(provider_id, request_id=request_id)
     except PayPalNotSent:
-        await _record(session, attempt_id, "NOT_SENT")
+        await _record(session, attempt_id, "NOT_SENT", reason="paypal_operation_not_sent")
         # Claim is intentionally retained; a recovery worker must safely reconcile.
         raise
     except (PayPalOutcomeUnknown, PayPalError) as exc:
@@ -347,11 +456,21 @@ async def execute_operation(
         session,
         payment,
         target,
-        evidence={"operation": operation, "provider_operation_id": operation_id},
+        evidence={
+            "source": "paypal_response",
+            "confirmed": True,
+            "operation": operation,
+            "request_id": request_id,
+            "provider_operation_id": operation_id,
+        },
     )
     attempt = await session.get(PaymentAttempt, attempt_id)
-    attempt.status = "SUCCEEDED"
+    attempt.status = "PENDING" if target == "CAPTURE_PENDING" else "SUCCEEDED"
     attempt.provider_operation_id = operation_id
+    if target == "CAPTURE_PENDING":
+        await _schedule_reconciliation(session, payment, attempt)
+    else:
+        await _complete_reconciliation(session, attempt_id, "PayPal operation response confirmed")
     await session.commit()
     # AUTHORIZED -> AWAITING_CONDITION is a separate permitted transition.
     if target == "AUTHORIZED":

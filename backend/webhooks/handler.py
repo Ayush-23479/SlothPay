@@ -160,7 +160,7 @@ async def _unfinished_attempts(
 ) -> list[PaymentAttempt]:
     query = select(PaymentAttempt).where(
         PaymentAttempt.payment_id == payment_id,
-        PaymentAttempt.status.in_(["STARTED", "UNCERTAIN"]),
+        PaymentAttempt.status.in_(["STARTED", "UNCERTAIN", "PENDING"]),
     )
     if operation is not None:
         query = query.where(PaymentAttempt.operation == operation)
