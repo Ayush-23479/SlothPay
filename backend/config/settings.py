@@ -4,6 +4,7 @@ Every setting comes from an environment variable (or a local .env file).
 Secrets never go in git: only .env.example is committed.
 """
 
+import math
 from functools import lru_cache
 
 from pydantic import model_validator
@@ -54,16 +55,38 @@ class Settings(BaseSettings):
     # --- used by later tasks (kept here so there is one settings file) ---
     CONDITION_MAX_HOURS: int = 48  # Task 9: longest ConditionalPay wait
     ALLOWED_CURRENCIES: str = "USD,EUR,GBP,INR"  # Task 5: confirm INR works in the sandbox
+    RECONCILIATION_DELAYS_SECONDS: str = "0.3,1,2,4,8"
 
     @property
     def currency_allowlist(self) -> list[str]:
         return [c.strip().upper() for c in self.ALLOWED_CURRENCIES.split(",") if c.strip()]
+
+    @property
+    def reconciliation_delays_seconds(self) -> tuple[float, ...]:
+        return tuple(
+            float(value.strip()) for value in self.RECONCILIATION_DELAYS_SECONDS.split(",")
+        )
 
     @model_validator(mode="after")
     def _refuse_live_paypal_in_demo(self) -> "Settings":
         if self.ENV in SANDBOX_ONLY_ENVS and "sandbox" not in self.PAYPAL_BASE_URL.lower():
             raise ValueError(
                 f"Refusing to start: ENV={self.ENV} but PAYPAL_BASE_URL is not the PayPal sandbox."
+            )
+        try:
+            delays = self.reconciliation_delays_seconds
+        except ValueError as exc:
+            raise ValueError("RECONCILIATION_DELAYS_SECONDS must contain five numbers") from exc
+        if (
+            len(delays) != 5
+            or any(not math.isfinite(delay) or delay <= 0 for delay in delays)
+            or any(
+                current >= following
+                for current, following in zip(delays, delays[1:], strict=False)
+            )
+        ):
+            raise ValueError(
+                "RECONCILIATION_DELAYS_SECONDS must contain five positive, increasing delays"
             )
         return self
 

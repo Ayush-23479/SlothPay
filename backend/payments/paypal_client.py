@@ -271,6 +271,12 @@ class PayPalClient:
             + self._identifier(authorization_id, "authorization_id"),
         )
 
+    async def get_capture(self, capture_id: str) -> dict[str, Any]:
+        return await self._request(
+            "GET",
+            "/v2/payments/captures/" + self._identifier(capture_id, "capture_id"),
+        )
+
     async def capture_authorization(
         self, authorization_id: str, *, request_id: str
     ) -> dict[str, Any]:

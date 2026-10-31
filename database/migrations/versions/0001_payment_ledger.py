@@ -16,7 +16,7 @@ depends_on = None
 
 def upgrade() -> None:
     # Explicit metadata in a versioned migration; do not call create_all at runtime.
-    for table in Base.metadata.sorted_tables:
+    for table in (t for t in Base.metadata.sorted_tables if t.name != "payment_reconciliations"):
         table.create(bind=op.get_bind(), checkfirst=False)
     op.execute("""
     CREATE FUNCTION slothpay_block_audit_mutation()
@@ -36,5 +36,7 @@ def upgrade() -> None:
 def downgrade() -> None:
     op.execute("DROP TRIGGER IF EXISTS payment_audit_immutable ON payment_audit")
     op.execute("DROP FUNCTION IF EXISTS slothpay_block_audit_mutation()")
-    for table in reversed(Base.metadata.sorted_tables):
+    for table in reversed(
+        [t for t in Base.metadata.sorted_tables if t.name != "payment_reconciliations"]
+    ):
         table.drop(bind=op.get_bind(), checkfirst=False)

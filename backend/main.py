@@ -8,6 +8,7 @@ from fastapi import FastAPI
 
 from backend.api.payment_operations import router as payment_operations_router
 from backend.config.settings import get_settings
+from backend.webhooks.receiver import router as paypal_webhook_router
 
 
 def create_app() -> FastAPI:
@@ -19,6 +20,7 @@ def create_app() -> FastAPI:
     )
 
     app.include_router(payment_operations_router)
+    app.include_router(paypal_webhook_router)  # Task 7
 
     @app.get("/health")
     def health() -> dict:

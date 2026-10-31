@@ -3,7 +3,16 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, String, UniqueConstraint, func
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -22,7 +31,10 @@ class ProviderEvent(Base):
     event_id: Mapped[str] = mapped_column(String(128), nullable=False)
     event_type: Mapped[str] = mapped_column(String(128), nullable=False)
     verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # Webhook payloads are stored MASKED (no emails, names or addresses).
     payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+    # Milliseconds PayPal took to answer the signature check (Task 7).
+    verify_ms: Mapped[int | None] = mapped_column(Integer)
     received_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

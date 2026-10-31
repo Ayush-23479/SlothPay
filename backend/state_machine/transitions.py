@@ -78,6 +78,7 @@ TRANSITIONS: dict[str, StatusMap] = {
 _CREATE_ORDER_RESOLUTIONS = {
     "CREATED": ORDER_CREATED,
     "PAYER_ACTION_REQUIRED": ORDER_CREATED,
+    "APPROVED": ORDER_CREATED,
     "NOT_FOUND": INTENT_CREATED,  # the order was never created; retry is allowed
     "FAILED": FAILED,
 }
