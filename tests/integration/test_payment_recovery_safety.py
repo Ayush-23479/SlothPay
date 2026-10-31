@@ -6,8 +6,6 @@ These tests commit records and do not remove them. PayPal is mocked.
 import asyncio
 import json
 import os
-import subprocess
-import sys
 import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -17,10 +15,7 @@ from unittest.mock import AsyncMock
 import pytest
 import pytest_asyncio
 from sqlalchemy import func, select
-from sqlalchemy.engine import make_url
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from backend.config.settings import get_settings
 from backend.models.attempt import PaymentAttempt
 from backend.models.audit import PaymentAudit
 from backend.models.payment import Payment
@@ -52,81 +47,9 @@ pytestmark = [
 
 
 @pytest_asyncio.fixture
-async def maker():
-    """Create a migrated, disposable PostgreSQL database per test."""
-    base_url = make_url(get_settings().DATABASE_URL)
-
-    if base_url.host not in ("localhost", "127.0.0.1"):
-        pytest.skip("Task 8 requires local PostgreSQL")
-
-    if not (
-        base_url.database == "slothpay" or base_url.database.startswith("slothpay_task8_test_")
-    ):
-        pytest.skip("Unexpected source database; refusing setup")
-
-    database_name = f"slothpay_task8_case_{uuid.uuid4().hex[:12]}"
-    isolated_url = base_url.set(database=database_name).render_as_string(hide_password=False)
-
-    create_command = [
-        "docker",
-        "exec",
-        "slothpay-postgres-1",
-        "createdb",
-        "-U",
-        "slothpay",
-        database_name,
-    ]
-
-    drop_command = [
-        "docker",
-        "exec",
-        "slothpay-postgres-1",
-        "dropdb",
-        "-U",
-        "slothpay",
-        database_name,
-    ]
-
-    engine = None
-    created = False
-
-    try:
-        subprocess.run(
-            create_command,
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        created = True
-
-        migration_env = os.environ.copy()
-        migration_env["DATABASE_URL"] = isolated_url
-
-        subprocess.run(
-            [sys.executable, "-m", "alembic", "upgrade", "head"],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=120,
-            env=migration_env,
-        )
-
-        engine = create_async_engine(isolated_url, pool_size=8)
-        yield async_sessionmaker(engine, expire_on_commit=False)
-
-    finally:
-        if engine is not None:
-            await engine.dispose()
-
-        if created:
-            subprocess.run(
-                drop_command,
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
+async def maker(isolated_maker):
+    """A migrated, disposable PostgreSQL database per test (see conftest.py)."""
+    return isolated_maker
 
 
 async def seed(maker, *, status="INTENT_CREATED", order_id=None, mode="SMARTPAY"):
@@ -357,8 +280,9 @@ async def test_lost_capture_response_reconciles_to_captured_without_second_captu
         for row in audit
     )
     assert any(
-        row.event_type == "PROVIDER_EVIDENCE_CONFIRMED"
-        and row.evidence["source"] == "paypal_get"
+        row.event_type == "RECONCILED"
+        and row.evidence["source"] == "reconcile"
+        and row.evidence["pending_operation"] == "capture"
         and row.evidence["confirmed"] is True
         for row in audit
     )

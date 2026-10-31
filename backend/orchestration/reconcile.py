@@ -22,7 +22,15 @@ from backend.models.payment import Payment
 from backend.models.reconciliation import PaymentReconciliation
 from backend.models.repository import transition_payment
 from backend.payments.paypal_client import PayPalError, PayPalNotSent, PayPalOutcomeUnknown
-from backend.state_machine.states import FINAL_STATUSES, UNCERTAIN
+from backend.state_machine.states import (
+    AUTHORIZE_REQUESTED,
+    CAPTURE_REQUESTED,
+    CONDITIONALPAY,
+    FINAL_STATUSES,
+    SMARTPAY,
+    UNCERTAIN,
+    VOID_REQUESTED,
+)
 from backend.state_machine.transitions import resolve_uncertain, validate_transition
 
 UNRESOLVED = frozenset({"STARTED", "UNCERTAIN", "NOT_SENT", "NOT_OCCURRED", "PENDING"})
@@ -63,6 +71,36 @@ def _one_resource(order: dict[str, Any], kind: str) -> dict[str, Any] | None:
     if not isinstance(resource, dict):
         return None
     return resource
+
+
+# Statuses a payment sits in after claiming an operation but before the outcome is known.
+CLAIM_STATUSES = frozenset({AUTHORIZE_REQUESTED, CAPTURE_REQUESTED, VOID_REQUESTED})
+
+# When PayPal proves an operation did NOT happen, the word resolve_uncertain() understands
+# and therefore the status the payment returns to. Anything not listed is never "undone".
+NOT_OCCURRED_WORD = {
+    (SMARTPAY, "capture"): "APPROVED",  # back to APPROVED
+    (CONDITIONALPAY, "authorize"): "APPROVED",  # back to APPROVED
+    (CONDITIONALPAY, "void"): "AUTHORIZED",  # back to AWAITING_CONDITION
+}
+
+
+def _no_resource(order: dict[str, Any], kind: str) -> bool:
+    """True only when the order has exactly one purchase unit and PROVES it holds no `kind`.
+
+    An absent `payments` block or an empty/absent list counts as none. A malformed shape
+    is NOT proof of absence, so it returns False.
+    """
+    units = order.get("purchase_units")
+    if not isinstance(units, list) or len(units) != 1 or not isinstance(units[0], dict):
+        return False
+    payments = units[0].get("payments")
+    if payments is None:
+        return True
+    if not isinstance(payments, dict):
+        return False
+    resources = payments.get(kind)
+    return resources is None or (isinstance(resources, list) and len(resources) == 0)
 
 
 def classify_provider_observation(
@@ -238,6 +276,24 @@ def _amount_matches(resource: dict[str, Any], payment: Payment) -> bool:
         return False
 
 
+def _order_unexecuted(order: dict[str, Any], payment: Payment, kind: str) -> bool:
+    """PayPal says the buyer approved the order and it holds no `kind` (capture/authorization).
+
+    This is the "the operation never reached PayPal" evidence. It is only ever used to allow
+    a retry with the SAME request id, which PayPal de-duplicates, so even a read that is
+    briefly behind cannot cause a second charge.
+    """
+    units = order.get("purchase_units")
+    return (
+        order.get("status") == "APPROVED"
+        and _no_resource(order, kind)
+        and isinstance(units, list)
+        and len(units) == 1
+        and isinstance(units[0], dict)
+        and _amount_matches(units[0], payment)
+    )
+
+
 async def _fetch_operation_evidence(
     session: AsyncSession,
     paypal: Any,
@@ -302,6 +358,13 @@ async def _fetch_operation_evidence(
 
         if attempt.operation == "authorize":
             resource = _one_resource(order, "authorizations")
+            if resource is None and _order_unexecuted(order, payment, "authorizations"):
+                return (
+                    "APPROVED",
+                    order_id,
+                    "NOT_OCCURRED",
+                    "PayPal order is still APPROVED with no authorization",
+                )
             if (
                 resource is None
                 or resource.get("status") != "CREATED"
@@ -342,6 +405,17 @@ async def _fetch_operation_evidence(
                 return None, None, "MANUAL_REVIEW", "Capture status is inconclusive"
 
             resource = _one_resource(order, "captures")
+            if (
+                resource is None
+                and payment.mode == SMARTPAY
+                and _order_unexecuted(order, payment, "captures")
+            ):
+                return (
+                    "APPROVED",
+                    order_id,
+                    "NOT_OCCURRED",
+                    "PayPal order is still APPROVED with no capture",
+                )
             if (
                 resource is None
                 or not isinstance(resource.get("id"), str)
@@ -501,12 +575,28 @@ async def reconcile_attempt(
         )
 
     if decision == "NOT_OCCURRED":
-        target_status = resolve_uncertain(
-            locked_payment.mode, locked_attempt.operation, "AUTHORIZED"
+        word = NOT_OCCURRED_WORD.get((locked_payment.mode, locked_attempt.operation))
+        target_status = (
+            resolve_uncertain(locked_payment.mode, locked_attempt.operation, word)
+            if word
+            else UNCERTAIN
         )
+        if target_status == UNCERTAIN:
+            finish_check(complete=False)
+            run.last_reason = "No safe way back for this operation"
+            await session.commit()
+            return _observation(
+                locked_payment,
+                locked_attempt,
+                "UNKNOWN",
+                run.last_reason,
+                provider_status,
+                resource_id,
+            )
         current = locked_payment.status
         steps = [target_status]
-        if current == "VOID_REQUESTED" and target_status == "AWAITING_CONDITION":
+        if current in CLAIM_STATUSES:
+            # A claim status only reaches its "before" status through UNCERTAIN.
             steps.insert(0, UNCERTAIN)
         for step in steps:
             if current == step:
@@ -554,12 +644,14 @@ async def reconcile_attempt(
         session.add(
             PaymentAudit(
                 payment_id=locked_payment.id,
-                event_type="PROVIDER_EVIDENCE_CONFIRMED",
+                event_type="RECONCILED",
                 actor="reconciliation",
                 evidence={
-                    "source": "paypal_get",
+                    "source": "reconcile",
                     "confirmed": True,
                     "decision": decision,
+                    "retry_allowed": True,
+                    "pending_operation": locked_attempt.operation,
                     "operation": locked_attempt.operation,
                     "request_id": locked_attempt.request_id,
                     "provider_status": provider_status,
@@ -675,11 +767,13 @@ async def reconcile_attempt(
     session.add(
         PaymentAudit(
             payment_id=locked_payment.id,
-            event_type="PROVIDER_EVIDENCE_CONFIRMED",
+            event_type="RECONCILED",
             actor="reconciliation",
             evidence={
-                "source": "paypal_get",
+                "source": "reconcile",
                 "confirmed": True,
+                "retry_allowed": False,
+                "pending_operation": locked_attempt.operation,
                 "operation": locked_attempt.operation,
                 "request_id": locked_attempt.request_id,
                 "provider_status": provider_status,

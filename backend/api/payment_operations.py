@@ -23,17 +23,14 @@ from backend.orchestration.lifecycle import (
     execute_operation,
     verify_buyer_approval,
 )
-from backend.orchestration.recovery import (
-    RescueActionNotAllowed,
-    execute_rescue_action,
-    get_rescue_plan,
-)
+from backend.orchestration.recovery import RescueActionNotAllowed, get_rescue_plan
 from backend.payments.paypal_client import (
     PayPalClient,
     PayPalError,
     PayPalNotSent,
     PayPalOutcomeUnknown,
 )
+from backend.reliability.rescue import DbRescueService, execute_rescue_action
 
 router = APIRouter(prefix="/internal/payments", tags=["internal-payment-operations"])
 
@@ -51,6 +48,7 @@ class RescuePlanResponse(BaseModel):
     allowed_actions: list[str]
     recommended_action: str
     evidence_reason: str
+    retry_allowed: bool = False
 
 
 class RescueActionRequest(BaseModel):
@@ -176,9 +174,7 @@ async def payment_rescue_plan(
     payment_id: uuid.UUID, _admin: Admin, session: Session
 ) -> RescuePlanResponse:
     try:
-        return RescuePlanResponse(
-            **await get_rescue_plan(session, payment_id=payment_id)
-        )
+        return RescuePlanResponse(**await get_rescue_plan(session, payment_id=payment_id))
     except ValueError as exc:
         raise HTTPException(status_code=404, detail="Payment not found") from exc
 
@@ -192,12 +188,8 @@ async def run_rescue_action(
     paypal: Gateway,
 ) -> dict:
     try:
-        return await execute_rescue_action(
-            session,
-            paypal,
-            payment_id=payment_id,
-            action=request.action,
-            actor="admin",
+        outcome = await execute_rescue_action(
+            DbRescueService(session, paypal), str(payment_id), request.action
         )
     except RescueActionNotAllowed as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -208,3 +200,6 @@ async def run_rescue_action(
             status_code=503,
             detail="Payment operation needs reconciliation; no automatic retry was made",
         ) from exc
+    if outcome.get("error"):
+        raise HTTPException(status_code=409, detail=outcome["error"])
+    return outcome

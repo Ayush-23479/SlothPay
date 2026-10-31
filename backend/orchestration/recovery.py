@@ -28,6 +28,7 @@ from backend.orchestration.lifecycle import (
 from backend.orchestration.reconcile import (
     UNRESOLVED,
     ReconciliationObservation,
+    _order_unexecuted,
     reconcile_attempt,
 )
 from backend.payments.paypal_client import PayPalError, PayPalNotSent, PayPalOutcomeUnknown
@@ -98,7 +99,28 @@ def _buyer_state(status: str, *, action_needed: bool) -> str:
 
 
 async def get_rescue_plan(session: AsyncSession, *, payment_id: uuid.UUID) -> dict:
-    """Return a deterministic action plan from persisted state and trusted evidence only."""
+    """Return a deterministic action plan from persisted state and trusted evidence only.
+
+    `retry_allowed` is True only when the plan offers RETRY_SAME_REQUEST, i.e. the operation
+    is durably proven not to have happened.
+    """
+    plan = await _build_plan(session, payment_id=payment_id)
+    plan["retry_allowed"] = ACTION_RETRY_SAME_REQUEST in plan["allowed_actions"]
+    return plan
+
+
+def _not_occurred_retry_ok(payment: Payment, operation: str) -> bool:
+    """Where a proven-not-done operation may be resent with its original request id."""
+    if payment.mode == "CONDITIONALPAY":
+        if operation == "void":
+            return payment.status == "AWAITING_CONDITION"
+        if operation == "authorize":
+            return payment.status == "APPROVED"
+        return False
+    return payment.mode == "SMARTPAY" and operation == "capture" and payment.status == "APPROVED"
+
+
+async def _build_plan(session: AsyncSession, *, payment_id: uuid.UUID) -> dict:
     payment = await session.get(Payment, payment_id)
     if payment is None:
         raise ValueError("Payment does not exist")
@@ -154,23 +176,17 @@ async def get_rescue_plan(session: AsyncSession, *, payment_id: uuid.UUID) -> di
                 "evidence_reason": reason,
             }
         if attempt.status == "NOT_OCCURRED":
-            retry_allowed = (
-                attempt.operation == "void"
-                and payment.status == "AWAITING_CONDITION"
-                and payment.mode == "CONDITIONALPAY"
-            )
+            retry_allowed = _not_occurred_retry_ok(payment, attempt.operation)
             actions = [ACTION_RETRY_SAME_REQUEST] if retry_allowed else [ACTION_CONTACT_SUPPORT]
             return {
                 "payment_id": str(payment.id),
                 "payment_state": payment.status,
-                "buyer_facing_state": _buyer_state(
-                    payment.status, action_needed=not retry_allowed
-                ),
+                "buyer_facing_state": _buyer_state(payment.status, action_needed=not retry_allowed),
                 "allowed_actions": actions,
                 "recommended_action": actions[0],
                 "evidence_reason": (
-                    "PayPal confirms the authorization remains active; only a same-ID void retry "
-                    "is permitted after a fresh status check."
+                    "PayPal confirms the operation did not happen; only a same-ID retry is "
+                    "permitted after a fresh status check."
                     if retry_allowed
                     else "PayPal confirmed the operation did not occur, but current state does not "
                     "permit retry."
@@ -279,9 +295,9 @@ async def _retry_not_sent(
     }.get(operation)
     allowed_states = {expected_state}
     if attempt_status == "NOT_OCCURRED":
-        if operation != "void":
-            raise RescueActionNotAllowed("Only a confirmed not-occurred void may be retried")
-        allowed_states.add("AWAITING_CONDITION")
+        if not _not_occurred_retry_ok(payment, operation):
+            raise RescueActionNotAllowed("This not-occurred operation may not be retried now")
+        allowed_states = {payment.status}
     if payment.status not in allowed_states:
         raise RescueActionNotAllowed("Payment state changed; the retry plan is stale")
     if operation == "capture" and payment.mode == "CONDITIONALPAY":
@@ -301,9 +317,7 @@ async def _retry_not_sent(
             raise RescueActionNotAllowed("No confirmed authorization ID is available")
         current_authorization = await paypal.get_authorization(provider_id)
         amount = (
-            current_authorization.get("amount")
-            if isinstance(current_authorization, dict)
-            else None
+            current_authorization.get("amount") if isinstance(current_authorization, dict) else None
         )
         try:
             amount_matches = (
@@ -343,6 +357,12 @@ async def _retry_not_sent(
             return {"state": target, "needs_reconciliation": False}
         if current_authorization.get("status") != "CREATED":
             raise RescueActionNotAllowed("Fresh authorization status does not permit a void retry")
+    if attempt_status == "NOT_OCCURRED" and operation in {"capture", "authorize"}:
+        # Fresh proof right before resending: the order must still be approved and untouched.
+        fresh_order = await paypal.get_order(provider_id)
+        kind = "captures" if operation == "capture" else "authorizations"
+        if not isinstance(fresh_order, dict) or not _order_unexecuted(fresh_order, payment, kind):
+            raise RescueActionNotAllowed("Fresh PayPal evidence no longer shows an untouched order")
     if operation == "capture" and payment.mode == "CONDITIONALPAY":
         condition = await session.scalar(
             select(PaymentCondition).where(
@@ -359,11 +379,16 @@ async def _retry_not_sent(
     mode = payment.mode
     amount = f"{payment.amount:.2f}"
     currency = payment.currency
-    if attempt_status == "NOT_OCCURRED" and payment.status == "AWAITING_CONDITION":
+    if attempt_status == "NOT_OCCURRED" and operation != "create_order":
+        claim_status = {
+            "void": "VOID_REQUESTED",
+            "capture": "CAPTURE_REQUESTED",
+            "authorize": "AUTHORIZE_REQUESTED",
+        }[operation]
         await _transition(
             session,
             payment,
-            "VOID_REQUESTED",
+            claim_status,
             evidence={
                 "source": "internal_record",
                 "confirmed": False,
@@ -478,9 +503,7 @@ async def _retry_not_sent(
     if target == "CAPTURE_PENDING":
         await _schedule_reconciliation(session, payment, attempt)
     else:
-        await _complete_reconciliation(
-            session, attempt_id, "PayPal operation response confirmed"
-        )
+        await _complete_reconciliation(session, attempt_id, "PayPal operation response confirmed")
     await session.commit()
     return {"state": payment.status, "needs_reconciliation": False}
 
@@ -517,9 +540,7 @@ async def execute_rescue_action(
     if action == ACTION_RETRY_SAME_REQUEST:
         return {
             "action": action,
-            "result": await _retry_not_sent(
-                session, paypal, payment_id=payment_id, actor=actor
-            ),
+            "result": await _retry_not_sent(session, paypal, payment_id=payment_id, actor=actor),
         }
     if action in {ACTION_CAPTURE, ACTION_VOID}:
         result = await execute_operation(
