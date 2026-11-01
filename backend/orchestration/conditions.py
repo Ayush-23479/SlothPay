@@ -1,5 +1,8 @@
+
 from __future__ import annotations
 
+import inspect
+import logging
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -51,6 +54,9 @@ _CONDITION_STATUS = {
 _DECIDED = frozenset(_CONDITION_STATUS.values())
 
 
+log = logging.getLogger("slothpay.conditions")
+
+
 class PaymentMissing(Exception):
     """The payment does not exist. Retrying cannot help."""
 
@@ -60,9 +66,27 @@ class ConditionNotReady(Exception):
 
 
 class PaymentService:
-    def __init__(self, session_factory: Callable[[], Any], gateway: Any) -> None:
+    def __init__(
+        self,
+        session_factory: Callable[[], Any],
+        gateway: Any,
+        on_event: Callable[[str, dict[str, Any]], Any] | None = None,
+    ) -> None:
         self._session_factory = session_factory
         self._gateway = gateway
+        # Called after a change is committed, so live screens can refresh (Task 10).
+        # It is injected, never imported: a failing notifier must not undo a payment fact.
+        self._on_event = on_event
+
+    async def _notify(self, intent_id: str, kind: str) -> None:
+        if self._on_event is None:
+            return
+        try:
+            result = self._on_event(intent_id, {"type": kind})
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            log.exception("live-update notification failed for payment %s", intent_id)
 
     async def resolve_condition(
         self,
@@ -72,6 +96,18 @@ class PaymentService:
         reason: str | None = None,
     ) -> dict[str, Any]:
         """verified=True captures the held funds; anything else voids them (default deny)."""
+        try:
+            return await self._resolve_condition(intent_id, verified, evidence, reason)
+        finally:
+            await self._notify(intent_id, "condition.resolved")
+
+    async def _resolve_condition(
+        self,
+        intent_id: str,
+        verified: bool,
+        evidence: dict[str, Any] | None,
+        reason: str | None,
+    ) -> dict[str, Any]:
         payment_id = _payment_id(intent_id)
         reason = reason or ("verified" if verified else "failed")
         async with self._session_factory() as session:
@@ -104,6 +140,12 @@ class PaymentService:
         self, intent_id: str, reason: str = "deadline"
     ) -> dict[str, Any]:
         """Record that the deadline passed. A verified condition is never overwritten."""
+        try:
+            return await self._mark_condition_expired(intent_id, reason)
+        finally:
+            await self._notify(intent_id, "condition.expired")
+
+    async def _mark_condition_expired(self, intent_id: str, reason: str) -> dict[str, Any]:
         payment_id = _payment_id(intent_id)
         async with self._session_factory() as session:
             if await session.get(Payment, payment_id) is None:
@@ -229,8 +271,10 @@ async def _latest_condition(
 async def _condition_type(session: AsyncSession, payment_id: uuid.UUID) -> str:
     original = await get_intent_created_evidence(session, payment_id)
     condition = original.get("condition") if isinstance(original, dict) else None
-    if isinstance(condition, dict) and isinstance(condition.get("type"), str):
-        return condition["type"][:64]
+    if isinstance(condition, dict):
+        for field in ("type", "kind"):
+            if isinstance(condition.get(field), str) and condition[field]:
+                return condition[field][:64]
     return "seller_condition"
 
 
