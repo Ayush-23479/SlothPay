@@ -173,6 +173,8 @@ async def run_flow(temporal, fake, action):
 
 
 async def result_of(env, intent_id):
+    if env.supports_time_skipping:
+        await env.sleep(timedelta(seconds=3700))
     return await env.client.get_workflow_handle(conditional_workflow_id(intent_id)).result()
 
 
