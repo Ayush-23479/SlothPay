@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from backend.config.settings import get_settings
+from backend.notifications.hub import get_hub
 from backend.webhooks.handler import (
     APPLIED,
     DUPLICATE,
@@ -32,6 +33,7 @@ async def get_webhook_deps() -> AsyncIterator[WebhookDeps]:
     try:
         yield WebhookDeps(
             session_factory=async_sessionmaker(engine, expire_on_commit=False),
+            publish=get_hub().publish,  # live screens refresh the moment a webhook applies
         )
     finally:
         await engine.dispose()
