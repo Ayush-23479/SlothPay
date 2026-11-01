@@ -172,9 +172,9 @@ async def run_flow(temporal, fake, action):
         return await action(starter, intent_id, skipping), intent_id
 
 
-async def result_of(env, intent_id):
-    if env.supports_time_skipping:
-        await env.sleep(timedelta(seconds=3700))
+async def result_of(env, intent_id, *, skip_seconds=0):
+    if skip_seconds and env.supports_time_skipping:
+        await env.sleep(timedelta(seconds=skip_seconds))
     return await env.client.get_workflow_handle(conditional_workflow_id(intent_id)).result()
 
 
@@ -215,7 +215,7 @@ async def test_no_signal_until_the_deadline_voids_and_never_captures(temporal):
 
     async def action(starter, intent_id, skipping):
         await starter.start(intent_id, deadline_in(skipping))
-        return await result_of(env, intent_id)
+        return await result_of(env, intent_id, skip_seconds=3700)
 
     result, intent_id = await run_flow(temporal, fake, action)
     assert fake.expired == [(intent_id, "deadline")]
