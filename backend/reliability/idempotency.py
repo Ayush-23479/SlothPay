@@ -1,22 +1,3 @@
-"""Duplicate protection for the pay click (Task 5): the Rs 500 double-tap fix.
-
-Layer 1, our own check:
-  * the idempotency key: a repeat returns the existing payment instead of making a new one,
-    and reusing a key with a different request (amount, currency, path, order id or
-    condition) is rejected;
-  * a short Redis lock so two clicks at the same moment cannot both pass;
-  * the merchant order id: the same order id is the same purchase, a different order id is a
-    separate purchase;
-  * a similar-payment guard for callers that do NOT say which order this is (same buyer,
-    amount and currency within 2 minutes while the first is still open);
-  * the database UNIQUE (owner, key) and (owner, order id) constraints as the final backstop.
-Layer 2, PayPal: a stable PayPal-Request-Id derived from the payment id and the operation
-(derive_request_id), so repeating the same request returns PayPal's original result.
-
-Money safety: if Redis is unreachable, register_intent raises instead of creating a payment
-without the lock (fail closed).
-"""
-
 from __future__ import annotations
 
 import json
@@ -32,6 +13,7 @@ from typing import Any
 from redis.exceptions import WatchError
 from sqlalchemy.exc import IntegrityError
 
+from backend.config.observability import report
 from backend.config.settings import get_settings
 from backend.models.repository import (
     add_audit_event,
@@ -179,9 +161,7 @@ def _validate_request(owner_id: Any, idempotency_key: Any, payload: Any) -> dict
     if not isinstance(idempotency_key, str) or not (
         KEY_MIN_LENGTH <= len(idempotency_key) <= KEY_MAX_LENGTH
     ):
-        raise ValueError(
-            f"idempotency_key must be {KEY_MIN_LENGTH} to {KEY_MAX_LENGTH} characters"
-        )
+        raise ValueError(f"idempotency_key must be {KEY_MIN_LENGTH} to {KEY_MAX_LENGTH} characters")
     if not isinstance(payload, dict):
         raise ValueError("payload must be a dict")
     description = payload.get("description")
@@ -207,7 +187,8 @@ def _validate_request(owner_id: Any, idempotency_key: Any, payload: Any) -> dict
         "owner_id": owner_id,
         "idempotency_key": idempotency_key,
         # No order id given: the key doubles as the order id (one purchase per key).
-        "merchant_order_id": explicit_order_id if explicit_order_id is not None
+        "merchant_order_id": explicit_order_id
+        if explicit_order_id is not None
         else idempotency_key,
         "explicit_order_id": explicit_order_id is not None,
         "path": _validate_path(payload.get("path")),
@@ -230,6 +211,9 @@ async def record_replay(session: Any, intent_id: str, reason: str = "same_key") 
         event_type="DUPLICATE_SUPPRESSED",
         actor="api",
         evidence={"source": "api", "confirmed": False, "reason": reason},
+    )
+    report(
+        "Duplicate suppressed", "info", layer="safety", operation=reason, intent_id=str(intent_id)
     )
 
 
@@ -313,9 +297,7 @@ async def _create_new(session: Any, request: dict[str, Any]) -> tuple[dict[str, 
         existing = await get_intent_by_key(session, owner_id, request["idempotency_key"])
         reason = "same_key"
         if existing is None:
-            existing = await get_intent_by_order_id(
-                session, owner_id, request["merchant_order_id"]
-            )
+            existing = await get_intent_by_order_id(session, owner_id, request["merchant_order_id"])
             reason = "same_order"
         if existing is None:
             raise
@@ -396,6 +378,13 @@ async def register_intent(
                             "confirmed": False,
                             "reason": "similar_intent",
                         },
+                    )
+                    report(
+                        "Duplicate suppressed",
+                        "info",
+                        layer="safety",
+                        operation="similar_intent",
+                        intent_id=str(similar["id"]),
                     )
                     await session.commit()
                     return similar, True

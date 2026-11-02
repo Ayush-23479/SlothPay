@@ -10,6 +10,7 @@ from typing import Any, Protocol
 
 from pydantic import BaseModel
 
+from backend.config.observability import report
 from backend.config.settings import Settings, get_settings
 from backend.intelligence import fallbacks
 from backend.intelligence.client import ModelClient
@@ -71,13 +72,22 @@ async def _ask(
         return None
     if prompt_check(system) or prompt_check(user):
         log.warning("AI prompt blocked: it still looked sensitive after masking")
+        _fallback_used("prompt_blocked")
         return None
     try:
         answer = await model.complete_json(system, user, schema)
     except Exception as exc:  # a broken client must never break the caller
         log.info("model client failed: %s", type(exc).__name__)
+        _fallback_used("client_error")
         return None
-    return answer if isinstance(answer, schema) else None
+    if isinstance(answer, schema):
+        return answer
+    _fallback_used("no_valid_answer")
+    return None
+
+
+def _fallback_used(reason: str) -> None:
+    report("AI fallback used", "info", layer="intelligence", operation=reason)
 
 
 def _strings(model: BaseModel) -> list[str]:
