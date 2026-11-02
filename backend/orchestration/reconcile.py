@@ -1,9 +1,3 @@
-"""Conservative, read-only PayPal evidence gathering for unresolved Task 6 attempts.
-
-Never POSTs or replays a payment. Provider reads alone do not mutate the ledger.
-A separate reviewed reconciliation decision must use compare-and-swap plus audit.
-"""
-
 from __future__ import annotations
 
 import uuid
@@ -15,6 +9,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.config.observability import report
 from backend.config.settings import get_settings
 from backend.models.attempt import PaymentAttempt
 from backend.models.audit import PaymentAudit
@@ -174,6 +169,18 @@ def classify_provider_observation(
         return None, None, "MANUAL_REVIEW", "Void outcome has no definitive provider evidence"
 
     return None, None, "MANUAL_REVIEW", "Unsupported observation"
+
+
+def _report_reconciled(payment: Payment, attempt: PaymentAttempt, outcome: str) -> None:
+    report(
+        "Reconciled after uncertainty",
+        "info",
+        layer="safety",
+        operation=attempt.operation,
+        intent_id=str(payment.id),
+        outcome=outcome,
+        chaos_mode=attempt.chaos_mode,
+    )
 
 
 async def inspect_provider_evidence(
@@ -641,6 +648,7 @@ async def reconcile_attempt(
             current = step
         locked_attempt.status = "NOT_OCCURRED"
         finish_check(complete=True)
+        _report_reconciled(locked_payment, locked_attempt, "not_occurred")
         session.add(
             PaymentAudit(
                 payment_id=locked_payment.id,
@@ -764,6 +772,7 @@ async def reconcile_attempt(
     else:
         locked_attempt.status = "FAILED" if target_status == "FAILED" else "SUCCEEDED"
         finish_check(complete=True)
+        _report_reconciled(locked_payment, locked_attempt, target_status)
     session.add(
         PaymentAudit(
             payment_id=locked_payment.id,

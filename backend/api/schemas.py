@@ -138,11 +138,19 @@ class RescueActionOut(BaseModel):
 
 
 class MetricsOut(BaseModel):
-    """Shape reserved for the monitoring task (Task 12). No route serves it yet."""
+    """Numbers computed from the database (Task 12). Latency is sandbox latency."""
 
-    total_payments: int
-    by_display_status: dict[str, int]
-    reconciliations_open: int = 0
+    total: int
+    completed: int
+    uncertain_now: int
+    recovered: int
+    duplicates_suppressed: int
+    retries: int
+    capture_seconds_avg: float | None = None
+    capture_seconds_p95: float | None = None
+    capture_latency_label: str = "sandbox"
+    webhook_verify_ms_avg: float | None = None
+    webhook_verify_ms_p95: float | None = None
     generated_at: datetime
 
 

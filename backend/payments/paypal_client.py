@@ -1,5 +1,3 @@
-"""Sandbox-only PayPal REST gateway. No orchestration or blind financial retries."""
-
 from __future__ import annotations
 
 import asyncio
@@ -11,6 +9,7 @@ from typing import Any
 import httpx
 
 from backend.config.settings import get_settings
+from backend.payments.hooks import FailureInjector, TransportLost, default_injector
 
 SANDBOX_URL = "https://api-m.sandbox.paypal.com"
 # Task 4 rule: every PayPal call has a 3 second timeout.
@@ -68,6 +67,26 @@ class PayPalNotSent(Exception):
     """
 
 
+def _operation_name(method: str, path: str) -> str:
+    """A short, id-free name for a request, such as capture_order or get_order."""
+    parts = [part for part in path.split("/") if part]
+    kind = (
+        "order"
+        if "orders" in parts
+        else "authorization"
+        if "authorizations" in parts
+        else "capture"
+    )
+    if method == "GET":
+        return f"get_{kind}"
+    last = parts[-1] if parts else "request"
+    if last == "orders":
+        return "create_order"
+    if last in {"capture", "authorize", "void"}:
+        return f"{last}_{kind}"
+    return f"{method.lower()}_{last}"
+
+
 class PayPalClient:
     """Low-level API client. Callers must enforce payment policy before money operations."""
 
@@ -79,12 +98,11 @@ class PayPalClient:
         base_url: str | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
         timeout: float = DEFAULT_TIMEOUT_SECONDS,
+        injector: FailureInjector | None = None,
     ) -> None:
         settings = get_settings()
         self._id = client_id if client_id is not None else settings.PAYPAL_CLIENT_ID
-        self._secret = (
-            client_secret if client_secret is not None else settings.PAYPAL_CLIENT_SECRET
-        )
+        self._secret = client_secret if client_secret is not None else settings.PAYPAL_CLIENT_SECRET
         url = (base_url if base_url is not None else settings.PAYPAL_BASE_URL).rstrip("/")
         if url != SANDBOX_URL:
             raise ValueError("Only PayPal's exact HTTPS sandbox API hostname is allowed")
@@ -93,6 +111,8 @@ class PayPalClient:
         if timeout <= 0:
             raise ValueError("HTTP timeout must be positive")
         self._http = httpx.AsyncClient(base_url=url, transport=transport, timeout=timeout)
+        # Controlled failures (Task 12). A no-op unless chaos is allowed and switched on.
+        self._injector = injector if injector is not None else default_injector()
         self._token: str | None = None
         self._token_expiry = 0.0
         self._token_lock = asyncio.Lock()
@@ -195,11 +215,22 @@ class PayPalClient:
             headers["Content-Type"] = "application/json"
         if request_id:
             headers["PayPal-Request-Id"] = request_id
+        operation = _operation_name(method, path)
         try:
-            response = await self._http.request(
-                method, path, json=json_body, headers=headers
-            )
+            headers.update(await self._injector.before_send(operation))
+        except TransportLost as exc:
+            # The request never left, so nothing happened and a retry is safe.
+            raise PayPalNotSent("Connection lost before the request was sent") from exc
+        try:
+            response = await self._http.request(method, path, json=json_body, headers=headers)
         except httpx.RequestError as exc:
+            raise PayPalOutcomeUnknown(
+                "PayPal network outcome unknown: reconcile before any retry"
+            ) from exc
+        try:
+            await self._injector.after_send(operation)
+        except TransportLost as exc:
+            # PayPal got the request but we lost the answer: the classic unknown outcome.
             raise PayPalOutcomeUnknown(
                 "PayPal network outcome unknown: reconcile before any retry"
             ) from exc
@@ -267,8 +298,7 @@ class PayPalClient:
     async def get_authorization(self, authorization_id: str) -> dict[str, Any]:
         return await self._request(
             "GET",
-            "/v2/payments/authorizations/"
-            + self._identifier(authorization_id, "authorization_id"),
+            "/v2/payments/authorizations/" + self._identifier(authorization_id, "authorization_id"),
         )
 
     async def get_capture(self, capture_id: str) -> dict[str, Any]:
@@ -290,9 +320,7 @@ class PayPalClient:
             financial=True,
         )
 
-    async def void_authorization(
-        self, authorization_id: str, *, request_id: str
-    ) -> dict[str, Any]:
+    async def void_authorization(self, authorization_id: str, *, request_id: str) -> dict[str, Any]:
         return await self._request(
             "POST",
             "/v2/payments/authorizations/"

@@ -715,7 +715,12 @@ def test_every_display_status_error_class_and_action_has_fixed_text():
 
 def test_the_intelligence_code_has_no_path_to_money():
     """It may read settings and state names, and nothing that talks to PayPal or the database."""
-    allowed = ("backend.config.settings", "backend.state_machine.states", "backend.intelligence")
+    allowed = (
+        "backend.config.settings",
+        "backend.config.observability",
+        "backend.state_machine.states",
+        "backend.intelligence",
+    )
     folder = Path(analysis.__file__).parent
     for path in folder.glob("*.py"):
         tree = ast.parse(path.read_text())

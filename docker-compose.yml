@@ -1,6 +1,35 @@
-# Local stack: PostgreSQL, Redis, Temporal dev server and the API.
-# Start:  docker compose up -d --build
-# Values below can be overridden from a .env file in this folder.
+# Local stack: PostgreSQL, Redis, Temporal dev server, database migrations and the API.
+#
+#   Start:            docker compose up -d --build
+#   With workers:     docker compose --profile workers up -d --build
+#   Stop:             docker compose down            (add -v to also wipe the database)
+#
+# Values below can be overridden from a .env file in this folder (see .env.example).
+# Inside Docker the services reach each other by name (postgres, redis, temporal), so the
+# localhost URLs in .env are NOT used for the containers.
+
+x-app-environment: &app-environment
+  ENV: ${ENV:-local}
+  DATABASE_URL: postgresql+asyncpg://slothpay:slothpay@postgres:5432/slothpay
+  REDIS_URL: redis://redis:6379/0
+  TEMPORAL_ADDRESS: temporal:7233
+  TEMPORAL_NAMESPACE: default
+  PAYPAL_CLIENT_ID: ${PAYPAL_CLIENT_ID:-}
+  PAYPAL_CLIENT_SECRET: ${PAYPAL_CLIENT_SECRET:-}
+  PAYPAL_BASE_URL: ${PAYPAL_BASE_URL:-https://api-m.sandbox.paypal.com}
+  PAYPAL_WEBHOOK_ID: ${PAYPAL_WEBHOOK_ID:-}
+  SENTRY_DSN: ${SENTRY_DSN:-}
+  GEMMA_BASE_URL: ${GEMMA_BASE_URL:-}
+  GEMMA_API_KEY: ${GEMMA_API_KEY:-}
+  GEMMA_MODEL: ${GEMMA_MODEL:-}
+  CHAOS_ENABLED: ${CHAOS_ENABLED:-false}
+  ADMIN_API_KEY: ${ADMIN_API_KEY:-}
+  PASSPORT_SIGNING_SECRET: ${PASSPORT_SIGNING_SECRET:-}
+  FRONTEND_ORIGIN: ${FRONTEND_ORIGIN:-http://localhost:3000}
+  CONDITION_MAX_HOURS: ${CONDITION_MAX_HOURS:-48}
+  ALLOWED_CURRENCIES: ${ALLOWED_CURRENCIES:-USD,EUR,GBP,INR}
+  RECONCILIATION_DELAYS_SECONDS: ${RECONCILIATION_DELAYS_SECONDS:-0.3,1,2,4,8}
+
 services:
   postgres:
     image: postgres:16
@@ -21,6 +50,7 @@ services:
   redis:
     image: redis:7
     ports:
+      # Host port 6380 (so it does not clash with a Redis you already run on 6379).
       - "127.0.0.1:6380:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
@@ -36,33 +66,73 @@ services:
       - "7233:7233"
       - "8233:8233"
 
+  migrate:
+    # Runs "alembic upgrade head" once and exits. The API waits for it to succeed.
+    build: .
+    command: ["python", "-m", "alembic", "upgrade", "head"]
+    environment: *app-environment
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
   api:
     build: .
     ports:
       - "8000:8000"
-    environment:
-      ENV: ${ENV:-local}
-      DATABASE_URL: postgresql+asyncpg://slothpay:slothpay@postgres:5432/slothpay
-      REDIS_URL: redis://redis:6379/0
-      TEMPORAL_ADDRESS: temporal:7233
-      TEMPORAL_NAMESPACE: default
-      PAYPAL_CLIENT_ID: ${PAYPAL_CLIENT_ID:-}
-      PAYPAL_CLIENT_SECRET: ${PAYPAL_CLIENT_SECRET:-}
-      PAYPAL_BASE_URL: ${PAYPAL_BASE_URL:-https://api-m.sandbox.paypal.com}
-      PAYPAL_WEBHOOK_ID: ${PAYPAL_WEBHOOK_ID:-}
-      SENTRY_DSN: ${SENTRY_DSN:-}
-      GEMMA_BASE_URL: ${GEMMA_BASE_URL:-}
-      GEMMA_API_KEY: ${GEMMA_API_KEY:-}
-      GEMMA_MODEL: ${GEMMA_MODEL:-}
-      CHAOS_ENABLED: ${CHAOS_ENABLED:-false}
-      ADMIN_API_KEY: ${ADMIN_API_KEY:-}
-      PASSPORT_SIGNING_SECRET: ${PASSPORT_SIGNING_SECRET:-}
-      FRONTEND_ORIGIN: ${FRONTEND_ORIGIN:-http://localhost:3000}
+    environment: *app-environment
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # ---- optional workers: docker compose --profile workers up -d ----------------------
+  # They need your PayPal sandbox credentials in .env.
+  temporal-worker:
+    profiles: ["workers"]
+    build: .
+    command: ["python", "-m", "backend.workflows.worker"]
+    environment: *app-environment
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      temporal:
+        condition: service_started
+    restart: unless-stopped
+
+  recovery-worker:
+    # Checks PayPal for payments whose outcome was unknown (UNCERTAIN) every few seconds.
+    profiles: ["workers"]
+    build: .
+    command:
+      - sh
+      - -c
+      - "while true; do python -m backend.orchestration.recovery_worker --run; sleep 5; done"
+    environment: *app-environment
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  webhook-worker:
+    # Applies verified PayPal webhook events from the inbox every few seconds.
+    profiles: ["workers"]
+    build: .
+    command:
+      - sh
+      - -c
+      - "while true; do python -m backend.webhooks.worker --run; sleep 5; done"
+    environment: *app-environment
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
 
 volumes:
   pgdata:
