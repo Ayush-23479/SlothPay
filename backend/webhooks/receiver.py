@@ -1,5 +1,3 @@
-"""HTTP entry point for PayPal webhook deliveries."""
-
 from __future__ import annotations
 
 import logging
@@ -9,6 +7,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from backend.config.observability import report
 from backend.config.settings import get_settings
 from backend.notifications.hub import get_hub
 from backend.webhooks.handler import (
@@ -67,6 +66,7 @@ async def receive_paypal_webhook(
         ) from None
 
     if outcome == REJECTED:
+        report("Webhook rejected", "warning", layer="events", operation="verify_signature")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Webhook signature rejected",

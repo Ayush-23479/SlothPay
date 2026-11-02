@@ -1,5 +1,3 @@
-"""One row per provider API operation, with its own stable request id."""
-
 import uuid
 from datetime import datetime
 
@@ -25,4 +23,6 @@ class PaymentAttempt(Base):
     request_id: Mapped[str] = mapped_column(String(128), nullable=False)
     status: Mapped[str] = mapped_column(String(48), nullable=False, default="STARTED")
     provider_operation_id: Mapped[str | None] = mapped_column(String(128))
+    # Set only when a controlled failure (Task 12) fired during this attempt.
+    chaos_mode: Mapped[str | None] = mapped_column(String(32))
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

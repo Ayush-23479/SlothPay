@@ -3,9 +3,14 @@
 .env.*
 !.env.example
 .venv
+venv
 __pycache__
 *.pyc
 .pytest_cache
 .ruff_cache
-frontend/node_modules
-frontend/.next
+.mypy_cache
+*.zip
+docs
+tests
+frontend
+README.md

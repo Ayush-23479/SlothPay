@@ -1,10 +1,3 @@
-"""Task 6 production-oriented, sandbox-only payment lifecycle.
-
-Uses a durable attempt + exclusive state claim before each money operation.
-One SQLAlchemy session is owned per invocation; do not pass unrelated pending writes.
-Recovery of STARTED / UNCERTAIN attempts belongs to reconciliation, never blind retry.
-"""
-
 from __future__ import annotations
 
 import hashlib
@@ -17,11 +10,13 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.config.observability import report
 from backend.config.settings import get_settings
 from backend.models.attempt import PaymentAttempt
 from backend.models.payment import Payment
 from backend.models.reconciliation import PaymentReconciliation
 from backend.models.repository import StalePaymentVersion, add_audit_event, transition_payment
+from backend.payments.hooks import take_chaos_mode
 from backend.payments.paypal_client import PayPalError, PayPalNotSent, PayPalOutcomeUnknown
 from backend.state_machine.guards import authorization_capturable, claim_status_for
 from backend.state_machine.transitions import validate_transition
@@ -139,6 +134,13 @@ async def _attempt(
     return attempt.id
 
 
+def _note_chaos(attempt: PaymentAttempt) -> None:
+    """Store the controlled failure that fired during this call, if one did."""
+    mode = take_chaos_mode()
+    if mode:
+        attempt.chaos_mode = mode
+
+
 async def _record(
     session: AsyncSession,
     attempt_id: uuid.UUID,
@@ -151,6 +153,7 @@ async def _record(
     if attempt is None:
         raise LifecycleSafetyError("Committed attempt row was not found")
     attempt.status = status
+    _note_chaos(attempt)
     if provider_operation_id:
         attempt.provider_operation_id = provider_operation_id
     if status == "NOT_SENT":
@@ -219,6 +222,16 @@ async def _uncertain(
     if attempt is None:
         raise LifecycleSafetyError("Committed attempt row was not found")
     attempt.status = "UNCERTAIN"
+    _note_chaos(attempt)
+    report(
+        "Payment became UNCERTAIN",
+        "warning",
+        layer="safety",
+        operation=operation,
+        intent_id=str(payment.id),
+        reason=reason,
+        chaos_mode=attempt.chaos_mode,
+    )
     await add_audit_event(
         session,
         payment_id=payment.id,
@@ -344,6 +357,7 @@ async def create_order(
     )
     attempt = await session.get(PaymentAttempt, attempt_id)
     attempt.status = "SUCCEEDED"
+    _note_chaos(attempt)
     attempt.provider_operation_id = order_id
     await _complete_reconciliation(session, attempt_id, "PayPal order creation confirmed")
     await session.commit()
@@ -466,6 +480,7 @@ async def execute_operation(
     )
     attempt = await session.get(PaymentAttempt, attempt_id)
     attempt.status = "PENDING" if target == "CAPTURE_PENDING" else "SUCCEEDED"
+    _note_chaos(attempt)
     attempt.provider_operation_id = operation_id
     if target == "CAPTURE_PENDING":
         await _schedule_reconciliation(session, payment, attempt)
