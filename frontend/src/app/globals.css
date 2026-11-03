@@ -213,3 +213,30 @@ body {
     transition: none;
   }
 }
+
+/* Print / save as PDF (Trust Passport): no navigation or buttons, plain white pages. */
+@media print {
+  @page {
+    margin: 14mm;
+  }
+  .no-print {
+    display: none !important;
+  }
+  html,
+  body {
+    background: #fff !important;
+  }
+  * {
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+    box-shadow: none !important;
+  }
+  .card {
+    border: 1px solid #b8c0c8;
+    break-inside: avoid;
+  }
+  a {
+    color: inherit;
+    text-decoration: none;
+  }
+}

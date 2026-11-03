@@ -186,6 +186,7 @@ async def test_a_valid_explanation_is_used_and_audited():
                 "source": "intelligence",
                 "confirmed": False,
                 "details": {"source": "model", "action": "explained_SWITCH_METHOD"},
+                "text": {"message": "The card was declined.", "next_step": "Use another card."},
             },
         )
     ]

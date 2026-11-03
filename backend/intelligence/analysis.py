@@ -203,22 +203,32 @@ _ERROR_SYSTEM = (
 )
 
 
-async def _audit(callback: AuditCallback | None, source: str, action: str) -> None:
+async def _audit(
+    callback: AuditCallback | None,
+    source: str,
+    action: str,
+    text: dict[str, str] | None = None,
+) -> None:
     if callback is None:
         return
+    evidence: dict[str, Any] = {
+        "source": "intelligence",
+        "confirmed": False,
+        "details": {"source": source, "action": action},
+    }
+    if text is not None:
+        # The sentences the buyer was shown, so the Trust Passport can quote them (Task 14).
+        evidence["text"] = text
     try:
-        result = callback(
-            AUDIT_EVENT,
-            {
-                "source": "intelligence",
-                "confirmed": False,
-                "details": {"source": source, "action": action},
-            },
-        )
+        result = callback(AUDIT_EVENT, evidence)
         if inspect.isawaitable(result):
             await result
     except Exception:  # an audit hiccup must never hide the explanation
         log.exception("could not record the AI explanation")
+
+
+def _shown_text(result: dict[str, Any]) -> dict[str, str]:
+    return {"message": str(result["message"]), "next_step": str(result["next_step"])}
 
 
 async def explain_error(
@@ -241,10 +251,12 @@ async def explain_error(
     answer = await _ask(client, _ERROR_SYSTEM, user, ErrorExplanation)
     action = f"explained_{known or 'unknown'}"
     if isinstance(answer, ErrorExplanation) and _answer_is_clean(answer):
-        await _audit(on_audit, MODEL, action)
-        return {"result": answer.model_dump(mode="json"), "source": MODEL}
-    await _audit(on_audit, TEMPLATE, action)
-    return {"result": template.model_dump(mode="json"), "source": TEMPLATE}
+        result = answer.model_dump(mode="json")
+        await _audit(on_audit, MODEL, action, _shown_text(result))
+        return {"result": result, "source": MODEL}
+    result = template.model_dump(mode="json")
+    await _audit(on_audit, TEMPLATE, action, _shown_text(result))
+    return {"result": result, "source": TEMPLATE}
 
 
 # -------------------------------------------------------------------------- extract_invoice
