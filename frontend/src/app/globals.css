@@ -1,26 +1,215 @@
 @import "tailwindcss";
 
+/* SlothPay look: clean white pages, a sky-blue hero, big bold type, pill buttons and large
+   rounded cards. The style is inspired by modern payment sites; the name and marks are ours. */
 :root {
   --background: #ffffff;
-  --foreground: #171717;
+  --foreground: #001435;
+  --muted: #5e6c7b;
+  --line: #d9dde1;
+  --sky: #cfe6f7;
+  --sky-deep: #b5d8f2;
+  --brand: #0b3d91;
+  --brand-bright: #0070e0;
+  --ink: #0b1220;
+  --soft: #eef0f2;
+  --ok: #0a7a3d;
+  --ok-bg: #dcf5e7;
+  --warn: #8a5300;
+  --warn-bg: #fff0cc;
+  --bad: #b3261e;
+  --bad-bg: #fde3e1;
+  --info: #0b3d91;
+  --info-bg: #dbe9fb;
+  --closed: #4a5563;
+  --closed-bg: #e6e9ed;
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --color-muted: var(--muted);
+  --color-line: var(--line);
+  --color-sky: var(--sky);
+  --color-brand: var(--brand);
+  --color-bright: var(--brand-bright);
+  --color-ink: var(--ink);
+  --color-soft: var(--soft);
+  --font-sans: "Helvetica Neue", Helvetica, Arial, system-ui, sans-serif;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+html {
+  scroll-behavior: smooth;
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Visible keyboard focus everywhere. */
+:focus-visible {
+  outline: 3px solid var(--brand-bright);
+  outline-offset: 2px;
+  border-radius: 8px;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  min-height: 2.75rem;
+  padding: 0.55rem 1.4rem;
+  border-radius: 999px;
+  border: 2px solid transparent;
+  font-weight: 600;
+  font-size: 0.95rem;
+  line-height: 1.2;
+  cursor: pointer;
+  transition: background-color 0.15s, border-color 0.15s, transform 0.05s;
+}
+.btn:active:not(:disabled) {
+  transform: translateY(1px);
+}
+.btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.btn-primary {
+  background: var(--ink);
+  color: #fff;
+}
+.btn-primary:hover:not(:disabled) {
+  background: #25324a;
+}
+.btn-blue {
+  background: var(--brand-bright);
+  color: #fff;
+}
+.btn-blue:hover:not(:disabled) {
+  background: #005bb8;
+}
+.btn-soft {
+  background: var(--soft);
+  color: var(--ink);
+}
+.btn-soft:hover:not(:disabled) {
+  background: #dfe3e7;
+}
+.btn-outline {
+  background: #fff;
+  color: var(--ink);
+  border-color: var(--ink);
+}
+.btn-outline:hover:not(:disabled) {
+  background: var(--soft);
+}
+.btn-danger {
+  background: #fff;
+  color: var(--bad);
+  border-color: var(--bad);
+}
+.btn-danger:hover:not(:disabled) {
+  background: var(--bad-bg);
+}
+.btn-sm {
+  min-height: 2.25rem;
+  padding: 0.3rem 1rem;
+  font-size: 0.85rem;
+}
+
+.card {
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 1.5rem;
+  padding: 1.5rem;
+}
+
+.field {
+  display: block;
+  width: 100%;
+  min-height: 3rem;
+  padding: 0.65rem 0.9rem;
+  border: 1.5px solid #9aa5b1;
+  border-radius: 0.75rem;
+  background: #fff;
+  color: var(--ink);
+  font-size: 1rem;
+}
+.field:hover {
+  border-color: var(--ink);
+}
+.field[aria-invalid="true"] {
+  border-color: var(--bad);
+}
+
+.label {
+  display: block;
+  margin-bottom: 0.35rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.hint {
+  margin-top: 0.3rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.error-text {
+  margin-top: 0.3rem;
+  font-size: 0.85rem;
+  color: var(--bad);
+  font-weight: 500;
+}
+
+.alert {
+  border-radius: 1rem;
+  padding: 0.85rem 1rem;
+  font-size: 0.9rem;
+  line-height: 1.45;
+}
+.alert-error {
+  background: var(--bad-bg);
+  color: #7a1912;
+}
+.alert-warn {
+  background: var(--warn-bg);
+  color: #5c3700;
+}
+.alert-info {
+  background: var(--info-bg);
+  color: #082a66;
+}
+.alert-ok {
+  background: var(--ok-bg);
+  color: #064d27;
+}
+
+.skeleton {
+  border-radius: 0.75rem;
+  background: linear-gradient(90deg, #eef0f2 25%, #f7f8f9 50%, #eef0f2 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.4s infinite;
+}
+@keyframes shimmer {
+  to {
+    background-position: -200% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+  .skeleton {
+    animation: none;
+  }
+  .btn {
+    transition: none;
+  }
 }

@@ -307,6 +307,12 @@ def _provider_result(operation: str, response: dict[str, Any], mode: str) -> tup
     raise LifecycleSafetyError("PayPal capture outcome is not definitive")
 
 
+def _return_url(payment_id: uuid.UUID, *, cancelled: bool = False) -> str:
+    """The dashboard page PayPal sends the buyer back to (FRONTEND_ORIGIN/pay/return)."""
+    origin = get_settings().FRONTEND_ORIGIN.rstrip("/")
+    return f"{origin}/pay/return?payment_id={payment_id}" + ("&cancelled=1" if cancelled else "")
+
+
 async def create_order(
     session: AsyncSession,
     paypal: Any,
@@ -327,6 +333,8 @@ async def create_order(
             amount=f"{payment.amount:.2f}",
             currency=payment.currency,
             request_id=request_id,
+            return_url=_return_url(payment.id),
+            cancel_url=_return_url(payment.id, cancelled=True),
         )
     except PayPalNotSent:
         await _record(session, attempt_id, "NOT_SENT", reason="paypal_operation_not_sent")

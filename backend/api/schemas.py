@@ -92,6 +92,15 @@ class PayPalIdsOut(BaseModel):
     capture_id: str | None = None
 
 
+class ConditionOut(BaseModel):
+    """The condition of a ConditionalPay payment. deadline_at is set once the funds are held."""
+
+    kind: str
+    description: str
+    deadline_minutes: int
+    deadline_at: datetime | None = None
+
+
 class PaymentOut(BaseModel):
     id: str
     path: PathName
@@ -102,6 +111,7 @@ class PaymentOut(BaseModel):
     allowed_actions: list[str]
     approval_url: str | None = None
     paypal_ids: PayPalIdsOut = Field(default_factory=PayPalIdsOut)
+    condition: ConditionOut | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -123,6 +133,14 @@ class EventOut(BaseModel):
     created_at: datetime
 
 
+class ExplanationOut(BaseModel):
+    """A plain-language explanation. source is 'model' (AI) or 'template' (standard text)."""
+
+    message: str
+    next_step: str
+    source: Literal["model", "template"]
+
+
 class RescueOut(BaseModel):
     payment_id: str
     display_status: DisplayStatus
@@ -130,6 +148,7 @@ class RescueOut(BaseModel):
     allowed_actions: list[str]
     recommended_action: str
     needs_human: bool
+    explanation: ExplanationOut | None = None
 
 
 class RescueActionOut(BaseModel):

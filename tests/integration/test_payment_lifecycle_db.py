@@ -1,9 +1,3 @@
-"""PostgreSQL integration tests for Task 6 lifecycle (PayPal is mocked).
-
-Only run against a disposable LOCAL test database. Opt in with
-SLOTHPAY_RUN_DB_TESTS=1. These tests commit rows and do not clean them up.
-"""
-
 import os
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -102,7 +96,7 @@ async def test_order_creation_persists_payment_and_attempt_before_return(maker):
     payment_id = await seed(maker)
     paypal = gateway()
 
-    async def create_at_provider(*, intent, amount, currency, request_id):
+    async def create_at_provider(*, intent, amount, currency, request_id, **_return_urls):
         assert (intent, amount, currency) == ("CAPTURE", "15.00", "USD")
         async with maker() as independent:
             attempt = await independent.scalar(

@@ -11,7 +11,7 @@ from typing import Any
 from urllib.parse import quote
 
 from redis.asyncio import Redis
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.api.deps import (
@@ -20,8 +20,16 @@ from backend.api.deps import (
     NotAllowed,
     PaymentsUnavailable,
 )
-from backend.api.schemas import EventOut, PaymentOut, PayPalIdsOut, RescueOut
+from backend.api.schemas import (
+    ConditionOut,
+    EventOut,
+    ExplanationOut,
+    PaymentOut,
+    PayPalIdsOut,
+    RescueOut,
+)
 from backend.config.settings import Settings, get_settings
+from backend.intelligence.analysis import explain_error
 from backend.models.attempt import PaymentAttempt
 from backend.models.audit import PaymentAudit
 from backend.models.payment import Payment
@@ -259,6 +267,7 @@ class DbPaymentApi:
             )
         ).all()
         ids = {operation: provider_id for operation, provider_id in rows}
+        condition = await self._condition_view(session, payment)
         return PaymentOut(
             id=str(payment.id),
             path=payment.mode,
@@ -275,8 +284,34 @@ class DbPaymentApi:
                 authorization_id=mask_id(ids.get("authorize")),
                 capture_id=mask_id(ids.get("capture")),
             ),
+            condition=condition,
             created_at=payment.created_at,
             updated_at=payment.updated_at,
+        )
+
+    async def _condition_view(self, session: AsyncSession, payment: Payment) -> ConditionOut | None:
+        """The ConditionalPay condition from the original request, with its deadline once the
+        funds are held (when the payment first reached AWAITING_CONDITION)."""
+        if payment.mode != "CONDITIONALPAY":
+            return None
+        original = await get_intent_created_evidence(session, payment.id) or {}
+        raw = original.get("condition") if isinstance(original, dict) else None
+        if not isinstance(raw, dict):
+            return None
+        minutes = raw.get("deadline_minutes")
+        if not isinstance(minutes, int) or isinstance(minutes, bool) or minutes < 1:
+            minutes = self._settings.CONDITION_MAX_HOURS * 60
+        held_at = await session.scalar(
+            select(func.min(PaymentAudit.created_at)).where(
+                PaymentAudit.payment_id == payment.id,
+                PaymentAudit.to_state == AWAITING_CONDITION,
+            )
+        )
+        return ConditionOut(
+            kind=str(raw.get("kind") or raw.get("type") or "condition")[:64],
+            description=str(raw.get("description") or "")[:200],
+            deadline_minutes=minutes,
+            deadline_at=held_at + timedelta(minutes=minutes) if held_at else None,
         )
 
     async def _view_by_id(self, payment_id: uuid.UUID) -> PaymentOut | None:
@@ -555,7 +590,16 @@ class DbPaymentApi:
             if await self._owned(session, owner_id, payment_id) is None:
                 return None
             intent = await DbRescueService(session, None).load_intent(str(payment_id))
-        plan = build_rescue_plan(intent, intent.get("last_error"), intent.get("provider_status"))
+        last_error = intent.get("last_error") or {}
+        plan = build_rescue_plan(intent, last_error, intent.get("provider_status"))
+        explanation = None
+        needs_explaining = (
+            normalize_status(intent.get("status")) == UNCERTAIN
+            or bool(last_error.get("error_class"))
+            or bool(plan["needs_human"])
+        )
+        if needs_explaining:
+            explanation = await self._explain(payment_id, intent, last_error)
         return RescueOut(
             payment_id=str(payment_id),
             display_status=plan["display_status"],
@@ -563,7 +607,37 @@ class DbPaymentApi:
             allowed_actions=list(plan["allowed_actions"]),
             recommended_action=plan["recommended_action"],
             needs_human=bool(plan["needs_human"]),
+            explanation=explanation,
         )
+
+    async def _explain(
+        self, payment_id: uuid.UUID, intent: dict[str, Any], last_error: dict[str, Any]
+    ) -> ExplanationOut | None:
+        """AI explanation when a model is configured, otherwise the standard text. Never fails
+        the request, and the AI_EXPLANATION audit row records which one was used."""
+
+        async def on_audit(event_type: str, evidence: dict[str, Any]) -> None:
+            async with self._sessions() as session:
+                await add_audit_event(
+                    session,
+                    payment_id=payment_id,
+                    event_type=event_type,
+                    actor="intelligence",
+                    evidence=evidence,
+                )
+                await session.commit()
+
+        try:
+            answer = await explain_error(
+                last_error.get("error_class"),
+                last_error.get("code"),
+                intent.get("status"),
+                on_audit=on_audit,
+            )
+            return ExplanationOut(source=answer["source"], **answer["result"])
+        except Exception as exc:  # an explanation must never break the rescue screen
+            log.warning("explanation unavailable: %s", type(exc).__name__)
+            return None
 
     async def rescue_action(
         self, owner_id: str, payment_id: uuid.UUID, action: str

@@ -133,6 +133,16 @@ class PayPalClient:
         return value
 
     @staticmethod
+    def _web_url(value: str, label: str) -> str:
+        if (
+            not isinstance(value, str)
+            or len(value) > 512
+            or not re.fullmatch(r"https?://[^\s<>\"']+", value)
+        ):
+            raise ValueError(f"Invalid {label}")
+        return value
+
+    @staticmethod
     def _money(value: str, currency: str) -> dict[str, str]:
         if not isinstance(currency, str) or not re.fullmatch(r"[A-Z]{3}", currency):
             raise ValueError("Currency must be an uppercase three-letter code")
@@ -260,14 +270,30 @@ class PayPalClient:
         return result
 
     async def create_order(
-        self, *, intent: str, amount: str, currency: str, request_id: str
+        self,
+        *,
+        intent: str,
+        amount: str,
+        currency: str,
+        request_id: str,
+        return_url: str | None = None,
+        cancel_url: str | None = None,
     ) -> dict[str, Any]:
         if intent not in {"CAPTURE", "AUTHORIZE"}:
             raise ValueError("Order intent must be CAPTURE or AUTHORIZE")
-        body = {
+        body: dict[str, Any] = {
             "intent": intent,
             "purchase_units": [{"amount": self._money(amount, currency)}],
         }
+        if return_url is not None:
+            # Where PayPal sends the buyer after approving (or cancelling) in the sandbox.
+            context = {
+                "return_url": self._web_url(return_url, "return_url"),
+                "cancel_url": self._web_url(cancel_url or return_url, "cancel_url"),
+                "user_action": "PAY_NOW",
+                "shipping_preference": "NO_SHIPPING",
+            }
+            body["payment_source"] = {"paypal": {"experience_context": context}}
         return await self._request(
             "POST", "/v2/checkout/orders", json_body=body, request_id=request_id, financial=True
         )
