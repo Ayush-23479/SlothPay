@@ -227,6 +227,40 @@ async def test_a_lost_capture_answer_is_reconciled_not_resent(world):
     world.paypal.capture_order.assert_awaited_once()
 
 
+async def test_an_uncertain_payment_gets_a_standard_explanation_and_an_audit_row(
+    world, monkeypatch
+):
+    monkeypatch.delenv("GEMMA_BASE_URL", raising=False)
+    view, _ = await checkout(world, "key-db-0008b")
+    world.paypal.state.order_status = "APPROVED"
+    world.paypal.capture_order.side_effect = PayPalOutcomeUnknown("answer was lost")
+    await world.api.buyer_returned(OWNER, pid(view))
+    plan = await world.api.rescue_plan(OWNER, pid(view))
+    assert plan.explanation is not None
+    assert plan.explanation.source == "template"
+    assert plan.explanation.message and plan.explanation.next_step
+    async with world.maker() as session:
+        rows = (
+            (
+                await session.execute(
+                    select(PaymentAudit).where(
+                        PaymentAudit.payment_id == pid(view),
+                        PaymentAudit.event_type == "AI_EXPLANATION",
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert len(rows) == 1 and rows[0].evidence["confirmed"] is False
+
+
+async def test_a_healthy_payment_gets_no_explanation(world):
+    view, _ = await checkout(world, "key-db-0008c")
+    plan = await world.api.rescue_plan(OWNER, pid(view))
+    assert plan.explanation is None
+
+
 async def test_two_returns_at_the_same_moment_capture_once(world):
     import asyncio
 
@@ -451,3 +485,13 @@ async def test_money_attempts_all_carry_stable_request_ids(world):
     operations = sorted(a.operation for a in attempts)
     assert operations == ["authorize", "capture", "create_order"]
     assert len({a.request_id for a in attempts}) == 3
+
+
+async def test_a_conditional_payment_shows_its_condition_and_deadline(world):
+    view, _ = await checkout(world, "key-db-cond-view", CONDITIONAL)
+    assert view.condition is not None
+    assert view.condition.description == "Parcel arrives"
+    assert view.condition.deadline_minutes == 90
+    assert view.condition.deadline_at is None  # funds not held yet
+    smart, _ = await checkout(world, "key-db-cond-smart")
+    assert smart.condition is None
