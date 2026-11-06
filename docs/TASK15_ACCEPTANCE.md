@@ -108,3 +108,17 @@ These results do not establish real PayPal Sandbox acceptance.
 ### Remaining
 - Randomized lost-answer recovery stress coverage.
 - Manual real Sandbox approval and provider verification.
+
+## Randomized Lost-Answer Stress Acceptance
+
+- Test: test_task15_randomized_lost_answer_stress
+- Scenarios: 100 fake-PayPal payments
+- Seed: 1515
+- Simulated failure: provider completes capture but response is lost
+- Recovery: provider-state reconciliation
+- Duplicate payment records: 0
+- Duplicate outbound captures: 0
+- Automated test: PASSED
+- Real Sandbox acceptance: PENDING manual verification
+
+This is simulator evidence, not real PayPal Sandbox evidence.

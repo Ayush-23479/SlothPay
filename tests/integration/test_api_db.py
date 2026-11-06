@@ -604,3 +604,134 @@ async def test_task15_100_payment_simulator(world):
     print("Duplicate outbound order creations: 0")
     print("Duplicate outbound captures: 0")
     print("Provider: FAKE PAYPAL ONLY")
+
+# ----------------------------------------------------- Task 15 lost-answer stress
+async def test_task15_randomized_lost_answer_stress(world):
+    """100 fake-PayPal captures with reproducible lost responses."""
+    import random
+
+    from sqlalchemy import func
+
+    rng = random.Random(1515)
+    owner = f"task15-lost-answer-{uuid.uuid4().hex}"
+    ids = set()
+    lost_answers = 0
+    normal_answers = 0
+
+    current = {"capture_id": None}
+
+    async def simulated_get_order(order_id):
+        status = world.paypal.state.order_status
+        response = {"id": order_id, "status": status}
+        if status == "COMPLETED":
+            response["purchase_units"] = [
+                {
+                    "amount": {
+                        "value": "10.00",
+                        "currency_code": "USD",
+                    },
+                    "payments": {
+                        "captures": [
+                            {
+                                "id": current["capture_id"],
+                                "status": "COMPLETED",
+                                "amount": {
+                                    "value": "10.00",
+                                    "currency_code": "USD",
+                                },
+                            }
+                        ]
+                    },
+                }
+            ]
+        return response
+
+    world.paypal.get_order.side_effect = simulated_get_order
+
+    for index in range(100):
+        key = f"t15-lost-{index}-{uuid.uuid4().hex}"
+        order = f"t15-order-{index}-{uuid.uuid4().hex}"
+        current["capture_id"] = f"CAP-T15-LOST-{uuid.uuid4().hex}"
+
+        world.paypal.state.order_status = "CREATED"
+        world.paypal.capture_order.side_effect = None
+
+        view, replay = await world.api.create_payment(
+            owner,
+            key,
+            {**SMART, "merchant_order_id": order},
+        )
+
+        assert replay is False
+        assert view.id not in ids
+        ids.add(view.id)
+        assert view.status == "AWAITING_APPROVAL"
+
+        world.paypal.state.order_status = "APPROVED"
+
+        world.paypal.capture_order.return_value = {
+            "purchase_units": [
+                {
+                    "payments": {
+                        "captures": [
+                            {
+                                "id": current["capture_id"],
+                                "status": "COMPLETED",
+                            }
+                        ]
+                    }
+                }
+            ]
+        }
+
+        before = world.paypal.capture_order.await_count
+
+        if rng.random() < 0.30:
+            lost_answers += 1
+            world.paypal.capture_order.side_effect = (
+                PayPalOutcomeUnknown("SIMULATOR: capture answer lost")
+            )
+
+            uncertain = await world.api.buyer_returned(owner, pid(view))
+            assert uncertain.status == "UNCERTAIN"
+
+            # The simulated provider completed the capture even
+            # though the client lost its response.
+            world.paypal.state.order_status = "COMPLETED"
+            world.paypal.capture_order.side_effect = None
+
+            recovered = await world.api.buyer_returned(owner, pid(view))
+            assert recovered.status == "CAPTURED"
+        else:
+            normal_answers += 1
+            captured = await world.api.buyer_returned(owner, pid(view))
+            assert captured.status == "CAPTURED"
+
+        # Repeating buyer return must not send another capture.
+        repeated = await world.api.buyer_returned(owner, pid(view))
+        assert repeated.status == "CAPTURED"
+
+        assert world.paypal.capture_order.await_count == before + 1
+
+    async with world.maker() as session:
+        count = await session.scalar(
+            select(func.count(Payment.id)).where(
+                Payment.merchant_id == owner
+            )
+        )
+
+    assert count == 100
+    assert len(ids) == 100
+    assert lost_answers > 0
+    assert normal_answers > 0
+    assert world.paypal.create_order.await_count == 100
+    assert world.paypal.capture_order.await_count == 100
+
+    print()
+    print("TASK 15 RANDOMIZED LOST-ANSWER SIMULATOR")
+    print(f"Payment scenarios: {count}")
+    print(f"Lost capture responses recovered: {lost_answers}")
+    print(f"Normal capture responses: {normal_answers}")
+    print("Duplicate payments: 0")
+    print("Duplicate outbound captures: 0")
+    print("Provider: FAKE PAYPAL ONLY")
