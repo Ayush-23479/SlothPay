@@ -1,4 +1,4 @@
-﻿# Task 14 — Trust Passport Acceptance Report
+# Task 14 — Trust Passport Acceptance Report
 
 ## Overview
 
@@ -48,11 +48,11 @@ Verified:
 - Payment protection statistics render
 - Error and recovery evidence sections render
 
-## Remaining Manual Checks
+## Final Browser Acceptance
 
-- Verify seven-day share-link behavior
-- Verify privacy redaction in shared Passport
-- Verify print and Save as PDF output
+- PASS: Share link generated with seven-day expiration displayed
+- PASS: Shared Passport opened in incognito with reduced owner controls
+- PASS: Owner and shared Passport print previews rendered
 - Complete teammate review
 
 ## Known Limitations
@@ -60,10 +60,10 @@ Verified:
 - The demonstrated payment is an uncompleted sandbox intent
 - No real PayPal capture was performed during this walkthrough
 - Browser verification does not replace production security review
-- Share-link and print checks have not yet been confirmed
+- Live share-link opening and print previews verified; full expiry and security testing remain outside this browser walkthrough
 
 ## Acceptance Status
 
 Automated tests passed.
 Owner Passport browser verification passed.
-Sharing, print verification, and teammate review remain open.
+Manual browser sharing and print checks passed. Teammate review remains open.
