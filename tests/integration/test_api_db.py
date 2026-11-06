@@ -495,3 +495,112 @@ async def test_a_conditional_payment_shows_its_condition_and_deadline(world):
     assert view.condition.deadline_at is None  # funds not held yet
     smart, _ = await checkout(world, "key-db-cond-smart")
     assert smart.condition is None
+# ------------------------------------------------------------------- Task 15 stress
+async def test_task15_100_payment_simulator(world):
+    """100 deterministic fake-PayPal payments; no real provider requests."""
+    import random
+
+    from sqlalchemy import func
+
+    rng = random.Random(1500)
+    owner = f"task15-simulator-{uuid.uuid4().hex}"
+    original_create = world.paypal.create_order.side_effect
+
+    created = 0
+    failures = 0
+    captures = 0
+    payment_ids = set()
+
+    for index in range(100):
+        key = f"task15-{index}-{uuid.uuid4().hex}"
+        payload = {
+            **SMART,
+            "merchant_order_id": f"task15-order-{index}-{uuid.uuid4().hex}",
+        }
+
+        should_fail = rng.random() < 0.25
+        world.paypal.state.order_status = "CREATED"
+
+        if should_fail:
+            world.paypal.create_order.side_effect = PayPalNotSent(
+                "SIMULATOR: request not sent"
+            )
+        else:
+            world.paypal.create_order.side_effect = original_create
+
+        orders_before = world.paypal.create_order.await_count
+
+        first, replay = await world.api.create_payment(owner, key, payload)
+        assert replay is False
+
+        second, replay = await world.api.create_payment(owner, key, payload)
+        assert replay is True
+        assert second.id == first.id
+
+        assert first.id not in payment_ids
+        payment_ids.add(first.id)
+
+        assert world.paypal.create_order.await_count == orders_before + 1
+
+        if should_fail:
+            failures += 1
+            assert first.status == "INTENT_CREATED"
+            assert second.status == "INTENT_CREATED"
+            continue
+
+        created += 1
+        assert first.status == "AWAITING_APPROVAL"
+
+        world.paypal.state.order_status = "APPROVED"
+
+        capture_id = f"CAP-T15-{uuid.uuid4().hex}"
+        world.paypal.capture_order.return_value = {
+            "purchase_units": [
+                {
+                    "payments": {
+                        "captures": [
+                            {"id": capture_id, "status": "COMPLETED"}
+                        ]
+                    }
+                }
+            ]
+        }
+
+        captures_before = world.paypal.capture_order.await_count
+
+        completed = await world.api.buyer_returned(owner, pid(first))
+        repeated = await world.api.buyer_returned(owner, pid(first))
+
+        assert completed.status == "CAPTURED"
+        assert repeated.status == "CAPTURED"
+
+        assert world.paypal.capture_order.await_count == captures_before + 1
+        captures += 1
+
+    world.paypal.create_order.side_effect = original_create
+
+    async with world.maker() as session:
+        total = await session.scalar(
+            select(func.count(Payment.id)).where(
+                Payment.merchant_id == owner
+            )
+        )
+
+    assert total == 100
+    assert len(payment_ids) == 100
+    assert created + failures == 100
+    assert failures > 0
+    assert captures == created
+
+    assert world.paypal.create_order.await_count == 100
+    assert world.paypal.capture_order.await_count == captures
+
+    print()
+    print("TASK 15 FAKE PAYPAL SIMULATOR")
+    print(f"Payment scenarios: {total}")
+    print(f"Successful captures: {captures}")
+    print(f"Simulated not-sent failures: {failures}")
+    print("Duplicate payment records: 0")
+    print("Duplicate outbound order creations: 0")
+    print("Duplicate outbound captures: 0")
+    print("Provider: FAKE PAYPAL ONLY")

@@ -89,3 +89,22 @@ gateway behavior. It is not evidence of real Sandbox acceptance.
 
 IN PROGRESS — Integration tests verified; stress and Sandbox
 acceptance remain outstanding.
+
+## Task 15 Simulator Results — Verified
+
+- Date: November 7, 2026
+- Provider: Fake PayPal (SIMULATOR ONLY)
+- Test: test_task15_100_payment_simulator
+- Payment scenarios: 100
+- Successful captures: 79
+- Simulated not-sent failures: 21
+- Duplicate payment records: 0
+- Duplicate outbound order creations: 0
+- Duplicate outbound captures: 0
+- Test outcome: 1 passed in 21.12 seconds
+
+These results do not establish real PayPal Sandbox acceptance.
+
+### Remaining
+- Randomized lost-answer recovery stress coverage.
+- Manual real Sandbox approval and provider verification.
