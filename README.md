@@ -76,6 +76,27 @@ Remove-Item Env:SLOTHPAY_RUN_DB_TESTS -ErrorAction SilentlyContinue
 
 **Last verified result (Task 6 branch, October 2026):** 241 unit/integration tests passed with one third-party Starlette deprecation warning; Ruff passed. This result does not establish live PayPal Sandbox end-to-end acceptance.
 
+## How to run the tests
+
+Everything below runs from the repository root with the virtual environment active. Integration tests create and drop their own throw-away databases, but they need a **local** PostgreSQL (and Redis for the Compose stack). They refuse to run against a remote database.
+
+| What | Command |
+| --- | --- |
+| Unit tests (fast, no services) | `.\.venv\Scripts\python.exe -m pytest -q tests/unit` |
+| Integration tests, including the Task 15 scenarios | `$env:SLOTHPAY_RUN_DB_TESTS = "1"` then `.\.venv\Scripts\python.exe -m pytest -q -rs tests/integration` |
+| One Task 15 scenario file | `.\.venv\Scripts\python.exe -m pytest -q tests/integration/test_lost_answer.py` |
+| Stress run against the fake PayPal (100 payments) | `.\.venv\Scripts\python.exe scripts/stress_fake.py` |
+| Same, different seed or size | `.\.venv\Scripts\python.exe scripts/stress_fake.py --payments 300 --seed 7` |
+| Real sandbox, human approves the buyer step | `$env:SLOTHPAY_RUN_SANDBOX = "1"` then `.\.venv\Scripts\python.exe -m pytest -s tests/e2e/test_sandbox_manual.py` |
+| Lint | `.\.venv\Scripts\python.exe -m ruff check backend tests scripts` |
+| Frontend | `cd frontend`, then `npm run lint` and `npm run build` |
+
+The `SLOTHPAY_RUN_*` variables apply only to the current PowerShell window; clear them with `Remove-Item Env:SLOTHPAY_RUN_DB_TESTS`. Temporal tests are skipped unless `TEMPORAL_TEST_ADDRESS` points at a running dev server, and a skipped test is not a passed test.
+
+**The fake PayPal (`tests/fake_paypal/app.py`).** A small FastAPI app that mimics only the PayPal endpoints SlothPay uses. It replays the stored answer for a repeated `PayPal-Request-Id`, supports the order states CREATED, APPROVED, COMPLETED and VOIDED, can delay, drop an answer after the work is done, or return 503 at random from a fixed seed, and reports counts of orders and captures at `GET /_stats`. The real `PayPalClient` talks to it in-process through `httpx.ASGITransport`. `PAYPAL_BASE_URL` is **not** used, because the client refuses every URL except the exact PayPal sandbox host and that safeguard stays on.
+
+**Reading the results honestly.** Anything produced with the fake PayPal is a *simulator* result and says so in its output. It shows that SlothPay's own logic does not duplicate payments. It says nothing about the real PayPal sandbox. The manual sandbox test is the only place that reports real sandbox behaviour, and it needs a person to approve the payment.
+
 ## Repository layout
 
 | Path | Responsibility |

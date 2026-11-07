@@ -55,3 +55,12 @@ async def isolated_maker():
             async with admin.connect() as connection:
                 await connection.execute(text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
         await admin.dispose()
+
+@pytest_asyncio.fixture
+async def sim(isolated_maker):
+    """SlothPay's real API and a fresh database, talking to the fake PayPal (simulator only)."""
+    from tests.integration.sim_support import build_world
+
+    world = await build_world(isolated_maker)
+    yield world
+    await world.redis.aclose()
