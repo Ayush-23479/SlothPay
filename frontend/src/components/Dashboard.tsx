@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { api, ApiRequestError } from "@/lib/api";
 import { formatMoney } from "@/lib/format";
@@ -136,13 +137,18 @@ export function Dashboard() {
                 {formatMoney(selected.amount, selected.currency)}
               </h2>
               <StatusBadge status={selected.display_status} />
-              <button
-                type="button"
-                className="btn btn-soft btn-sm ml-auto"
-                onClick={() => setSelectedId(null)}
-              >
-                Close
-              </button>
+              <div className="ml-auto flex flex-wrap gap-2">
+                <Link href={`/payments/${selected.id}/passport`} className="btn btn-outline btn-sm">
+                  Open Trust Passport
+                </Link>
+                <button
+                  type="button"
+                  className="btn btn-soft btn-sm"
+                  onClick={() => setSelectedId(null)}
+                >
+                  Close
+                </button>
+              </div>
             </div>
             {selected.status === "AWAITING_APPROVAL" && selected.approval_url ? (
               <p className="alert alert-info mt-4">

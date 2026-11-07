@@ -68,9 +68,16 @@ export function ReturnClient() {
             ) : null}
           </div>
         )}
-        <Link href="/" className="btn btn-primary mt-8">
-          Back to dashboard
-        </Link>
+        <div className="mt-8 flex flex-wrap justify-center gap-3">
+          {payment ? (
+            <Link href={`/payments/${payment.id}/passport`} className="btn btn-outline">
+              View Trust Passport
+            </Link>
+          ) : null}
+          <Link href="/" className="btn btn-primary">
+            Back to dashboard
+          </Link>
+        </div>
       </div>
     </div>
   );

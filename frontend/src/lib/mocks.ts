@@ -11,10 +11,14 @@ import type {
   DisplayStatus,
   InvoiceResult,
   Metrics,
+  Passport,
+  PassportEntry,
+  PassportError,
   Payment,
   PaymentCreate,
   PaymentEvent,
   Rescue,
+  ShareLink,
 } from "./types";
 
 interface Store {
@@ -23,6 +27,7 @@ interface Store {
   keys: Record<string, string>;
   chaos: ChaosSettings;
   seq: number;
+  dups?: Record<string, number>;
 }
 
 const OFF: ChaosSettings = {
@@ -117,6 +122,7 @@ function seed(): Store {
     },
   });
   store.payments = [failed, held, done, closed];
+  store.dups = { [done.id]: 1 };
   const add = (p: Payment, rows: [string, string, string, string | null, string | null, boolean][]) => {
     store.events[p.id] = rows.map(([type, title, summary, from, to, confirmed], i) => ({
       id: `evt-${++store.seq}`,
@@ -242,7 +248,11 @@ export const mockApi: Api = {
     await sleep(350);
     const store = load();
     const existing = store.keys[key];
-    if (existing) return { payment: { ...find(existing) }, replay: true };
+    if (existing) {
+      store.dups = { ...store.dups, [existing]: (store.dups?.[existing] ?? 0) + 1 };
+      save();
+      return { payment: { ...find(existing) }, replay: true };
+    }
 
     const chaos = store.chaos;
     if (chaos.mode === "delay") await sleep(Math.min(chaos.delay_ms, 4000));
@@ -503,4 +513,144 @@ export const mockApi: Api = {
       },
     };
   },
+
+  async getPassport(id) {
+    await sleep(250);
+    const payment = find(id);
+    return buildPassport(payment, load().events[id] ?? [], load().dups?.[id] ?? 0, false);
+  },
+
+  async sharePassport(id): Promise<ShareLink> {
+    await sleep(200);
+    find(id);
+    const token = `mock-${id}`;
+    return {
+      token,
+      url: `${window.location.origin}/passport/${token}`,
+      expires_at: iso(7 * 24 * 3600_000),
+    };
+  },
+
+  async getSharedPassport(token) {
+    await sleep(250);
+    const id = token.startsWith("mock-") ? token.slice(5) : "";
+    const payment = load().payments.find((item) => item.id === id);
+    if (!payment) return failWith(404, "not_found", "Passport not found");
+    return buildPassport(payment, load().events[id] ?? [], load().dups?.[id] ?? 0, true);
+  },
 };
+
+// ------------------------------------------------------------ Trust Passport (mock)
+const SOURCE: Record<string, string> = {
+  paypal: "PayPal webhook",
+  internal_record: "SlothPay record",
+};
+
+async function sha256(text: string): Promise<string> {
+  try {
+    const bytes = new TextEncoder().encode(text);
+    const digest = await crypto.subtle.digest("SHA-256", bytes);
+    return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
+  } catch {
+    let h = 5381;
+    for (const ch of text) h = (h * 33) ^ ch.charCodeAt(0);
+    return (h >>> 0).toString(16).padStart(64, "0");
+  }
+}
+
+async function buildPassport(
+  payment: Payment,
+  events: PaymentEvent[],
+  duplicates: number,
+  shared: boolean,
+): Promise<Passport> {
+  let previous = "";
+  const timeline: PassportEntry[] = [];
+  for (const event of events) {
+    const body = {
+      time: event.created_at,
+      title: event.title,
+      status_change: event.to_status ? { from: event.from_status, to: event.to_status } : null,
+      source: SOURCE[event.source] ?? "SlothPay",
+      confirmed: event.confirmed,
+      explanation: event.summary,
+    };
+    previous = await sha256(previous + JSON.stringify(body));
+    timeline.push({ ...body, entry_hash: previous });
+  }
+  const errors: PassportError[] = [];
+  for (const event of events) {
+    if (event.to_status === "FAILED") {
+      errors.push({
+        time: event.created_at,
+        operation: "capture",
+        error_class: "SWITCH_METHOD",
+        plain_explanation: "PayPal could not use this payment method.",
+        next_step: "Ask the buyer to choose a different payment method.",
+        explanation_source: "template",
+        what_slothpay_did: "Stopped the payment and showed what to do next. Nothing was charged.",
+      });
+    }
+    if (event.to_status === "UNCERTAIN") {
+      errors.push({
+        time: event.created_at,
+        operation: "capture",
+        error_class: "RETRY",
+        plain_explanation: "PayPal did not answer in time, so the result is not known yet.",
+        next_step: "Wait. SlothPay is checking and will not send the request again by itself.",
+        explanation_source: "template",
+        what_slothpay_did:
+          "Did not send the request again. Asked PayPal what happened, using the same request id.",
+      });
+    }
+  }
+  const outcome: Record<string, string> = {
+    CAPTURED: "The payment was completed.",
+    VOIDED: "The held money was released. Nothing was charged.",
+    CANCELLED: "The payment was cancelled. Nothing was charged.",
+    FAILED: "The payment did not go through. Nothing was charged.",
+    UNCERTAIN: "The result is being checked with PayPal. SlothPay will not charge twice.",
+    AWAITING_APPROVAL: "Waiting for the buyer to approve the payment in PayPal.",
+    AWAITING_CONDITION: "The money is held and waits for its condition.",
+  };
+  const condition = payment.condition;
+  return {
+    view: shared ? "shared" : "owner",
+    summary: {
+      payment_id: mask(payment.id.replaceAll("-", "")).toLowerCase(),
+      path: payment.path,
+      amount: payment.amount,
+      currency: payment.currency,
+      display_status: payment.display_status,
+      final_outcome: outcome[payment.status] ?? "The payment is in progress.",
+    },
+    timeline,
+    condition: condition
+      ? {
+          required: condition.description,
+          status:
+            payment.status === "CAPTURED"
+              ? "VERIFIED"
+              : payment.status === "VOIDED"
+                ? "FAILED"
+                : "PENDING",
+          verified_at: payment.status === "CAPTURED" ? payment.updated_at : null,
+          evidence_summary:
+            payment.status === "CAPTURED"
+              ? "The condition was confirmed as met."
+              : payment.status === "VOIDED"
+                ? "The condition was not met, so the money was not taken."
+                : "No evidence yet. The money waits for the condition.",
+        }
+      : null,
+    errors,
+    protections: {
+      duplicate_replays: duplicates,
+      paypal_request_ids_used: [mask(`req${payment.id.replaceAll("-", "")}`).toLowerCase()],
+      blind_retries: 0,
+      safe_retries: 0,
+      reconciled: events.some((e) => e.title === "Checked with PayPal"),
+    },
+    integrity: { chain_valid: true, head: previous || null },
+  };
+}

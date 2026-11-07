@@ -172,6 +172,65 @@ export interface InvoiceResult {
   source: "model" | "template";
 }
 
+// ------------------------------------------------------------ Trust Passport (Task 14)
+export interface PassportEntry {
+  time: string | null;
+  title: string;
+  status_change: { from: string | null; to: string } | null;
+  source: string;
+  confirmed: boolean;
+  explanation: string;
+  entry_hash: string;
+}
+
+export interface PassportError {
+  time: string | null;
+  operation: string;
+  error_class: string;
+  plain_explanation: string;
+  next_step: string | null;
+  explanation_source: "model" | "template";
+  what_slothpay_did: string;
+}
+
+export interface PassportCondition {
+  required: string | null;
+  status: string;
+  verified_at: string | null;
+  evidence_summary: string;
+}
+
+export interface PassportProtections {
+  duplicate_replays: number;
+  paypal_request_ids_used: string[];
+  blind_retries: number;
+  safe_retries: number;
+  reconciled: boolean;
+}
+
+export interface Passport {
+  view: "owner" | "shared";
+  summary: {
+    payment_id: string | null;
+    path: PathName;
+    amount: string;
+    currency: string;
+    display_status: DisplayStatus;
+    final_outcome: string;
+  };
+  timeline: PassportEntry[];
+  condition: PassportCondition | null;
+  errors: PassportError[];
+  protections: PassportProtections;
+  integrity: { chain_valid: boolean; head: string | null };
+}
+
+export interface ShareLink {
+  token: string;
+  url: string;
+  expires_at: string;
+}
+
 export interface ApiErrorBody {
   error: string;
   message: string;

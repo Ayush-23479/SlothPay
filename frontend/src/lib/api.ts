@@ -12,12 +12,14 @@ import type {
   DoubleClickResult,
   InvoiceResult,
   Metrics,
+  Passport,
   Payment,
   PaymentCreate,
   PaymentEvent,
   PaymentList,
   Rescue,
   RescueActionResult,
+  ShareLink,
 } from "./types";
 
 export class ApiRequestError extends Error {
@@ -52,6 +54,9 @@ export interface Api {
   setChaos(body: ChaosSetIn): Promise<ChaosSettings>;
   doubleClick(body: DoubleClickIn): Promise<DoubleClickResult>;
   extractInvoice(text: string): Promise<InvoiceResult>;
+  getPassport(id: string): Promise<Passport>;
+  sharePassport(id: string): Promise<ShareLink>;
+  getSharedPassport(token: string): Promise<Passport>;
 }
 
 interface RequestOptions {
@@ -156,6 +161,10 @@ const realApi: Api = {
   setChaos: (body) => post<ChaosSettings>("/api/chaos", body, { admin: true }),
   doubleClick: (body) => post<DoubleClickResult>("/api/chaos/double-click", body, { admin: true }),
   extractInvoice: (text) => post<InvoiceResult>("/api/invoices/extract", { text }),
+  getPassport: (id) => get<Passport>(`${base}/${encodeURIComponent(id)}/passport`),
+  sharePassport: (id) =>
+    post<ShareLink>(`${base}/${encodeURIComponent(id)}/passport/share`, undefined),
+  getSharedPassport: (token) => get<Passport>(`/api/passport/${encodeURIComponent(token)}`),
 };
 
 export const api: Api = USE_MOCKS ? mockApi : realApi;
