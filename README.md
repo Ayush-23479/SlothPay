@@ -97,6 +97,14 @@ The `SLOTHPAY_RUN_*` variables apply only to the current PowerShell window; clea
 
 **Reading the results honestly.** Anything produced with the fake PayPal is a *simulator* result and says so in its output. It shows that SlothPay's own logic does not duplicate payments. It says nothing about the real PayPal sandbox. The manual sandbox test is the only place that reports real sandbox behaviour, and it needs a person to approve the payment.
 
+## Security checks
+
+```bash
+python scripts/scan_secrets.py     # secrets scan, exit 1 on a hit
+```
+
+See `docs/TASK16_SECURITY.md` for what is enforced and the deployment caveats. After pulling Task 16 run `alembic upgrade head` once on your local database.
+
 ## Repository layout
 
 | Path | Responsibility |

@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, Request
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from backend.api.deps import PaymentsUnavailable, translate_errors
+from backend.api.deps import Owner, PaymentsUnavailable, translate_errors
 from backend.api.schemas import MetricsOut
 
 router = APIRouter(prefix="/api", tags=["metrics"])
@@ -89,6 +89,7 @@ def get_session_factory(request: Request) -> async_sessionmaker[AsyncSession]:
 
 @router.get("/metrics", response_model=MetricsOut)
 async def metrics(
+    _owner: Owner,  # Task 16: a session is required; the numbers are aggregate counts only
     factory: Annotated[async_sessionmaker[AsyncSession], Depends(get_session_factory)],
 ) -> MetricsOut:
     with translate_errors():

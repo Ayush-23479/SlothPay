@@ -10,6 +10,12 @@ def clean_env(monkeypatch):
         monkeypatch.delenv(name, raising=False)
 
 
+GOOD_SECRETS = {
+    "ADMIN_API_KEY": "a" * 16 + "B" * 16 + "7" * 8,
+    "PASSPORT_SIGNING_SECRET": "z" * 12 + "Q" * 12 + "4" * 12,
+}
+
+
 def make(**kwargs) -> Settings:
     return Settings(_env_file=None, **kwargs)
 
@@ -33,7 +39,7 @@ def test_refuses_live_paypal_url_in_demo_and_production(env):
 
 @pytest.mark.parametrize("env", ["demo", "production"])
 def test_accepts_sandbox_url_in_demo_and_production(env):
-    s = make(ENV=env, PAYPAL_BASE_URL="https://api-m.sandbox.paypal.com")
+    s = make(ENV=env, PAYPAL_BASE_URL="https://api-m.sandbox.paypal.com", **GOOD_SECRETS)
     assert s.ENV == env
 
 
