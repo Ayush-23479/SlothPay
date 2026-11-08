@@ -4,7 +4,7 @@
 // with fetch. It reconnects by itself with a growing delay and sends Last-Event-ID so the
 // server replays what was missed. Events are de-duplicated by id.
 
-import { authHeaders } from "./api";
+import { authHeaders, ensureSession } from "./api";
 import { API_BASE_URL, USE_MOCKS } from "./config";
 import { mockSubscribe } from "./mocks";
 import type { Payment, PaymentEvent, StreamState } from "./types";
@@ -68,6 +68,7 @@ export function openPaymentStream(paymentId: string, handlers: StreamHandlers): 
 
   async function run() {
     let first = true;
+    let renewed = false;
     while (!stopped) {
       handlers.onState(first ? "connecting" : "reconnecting");
       first = false;
@@ -79,8 +80,12 @@ export function openPaymentStream(paymentId: string, handlers: StreamHandlers): 
         if (lastId) headers["Last-Event-ID"] = lastId;
         const response = await fetch(
           `${API_BASE_URL}/api/payments/${encodeURIComponent(paymentId)}/stream`,
-          { headers, signal: controller.signal, cache: "no-store" },
+          { headers, signal: controller.signal, cache: "no-store", credentials: "include" },
         );
+        if (response.status === 401 && !renewed) {
+          renewed = true; // one try with a fresh session before giving up
+          if (await ensureSession()) continue;
+        }
         if (!response.ok || !response.body) {
           if (response.status === 401 || response.status === 404) {
             handlers.onState("closed"); // nothing to retry: not ours, or it does not exist

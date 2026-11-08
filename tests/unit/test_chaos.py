@@ -30,6 +30,11 @@ ADMIN = "admin-key-for-tests"
 def settings(**overrides) -> Settings:
     values = {"ENV": "local", "CHAOS_ENABLED": True, "ADMIN_API_KEY": ADMIN}
     values.update(overrides)
+    if values["ENV"] in {"demo", "production"}:
+        # Since Task 16 Settings refuses to start with chaos switched on in a protected
+        # environment. These tests exercise the SECOND line of defence (chaos_allowed and the
+        # routes), so they build that impossible configuration without validation.
+        return Settings.model_construct(**values)
     return Settings(_env_file=None, **values)
 
 
@@ -507,7 +512,7 @@ async def test_metrics_is_unavailable_without_a_database():
     install_error_handlers(app)
     app.include_router(metrics_router)
     async with api(app) as http:
-        response = await http.get("/api/metrics")
+        response = await http.get("/api/metrics", headers={"X-Owner-Id": "metrics-viewer"})
     assert response.status_code == 503
     assert response.json()["error"] == "payments_unavailable"
 

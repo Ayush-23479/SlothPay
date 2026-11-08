@@ -16,6 +16,7 @@ TRACES_SAMPLE_RATE = 0.1
 REDACTED = "[redacted]"
 EMAIL_REDACTED = "[email]"
 _EMAIL = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9\-]+(?:\.[A-Za-z0-9\-]+)+")
+_BEARER = re.compile(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=\-]{8,}")
 _SECRET_HEADERS = frozenset(
     {
         "authorization",
@@ -37,7 +38,7 @@ def _scrub_value(value: Any, depth: int = 0) -> Any:
     if depth > _MAX_DEPTH:
         return value
     if isinstance(value, str):
-        return _EMAIL.sub(EMAIL_REDACTED, value)
+        return _BEARER.sub(lambda m: f"{m.group(1)} {REDACTED}", _EMAIL.sub(EMAIL_REDACTED, value))
     if isinstance(value, dict):
         out: dict[Any, Any] = {}
         for key, item in value.items():

@@ -116,7 +116,7 @@ def metrics_app(maker) -> FastAPI:
 async def get_metrics(maker) -> dict:
     transport = httpx.ASGITransport(app=metrics_app(maker))
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
-        response = await http.get("/api/metrics")
+        response = await http.get("/api/metrics", headers={"X-Owner-Id": "metrics-viewer"})
     assert response.status_code == 200
     return response.json()
 

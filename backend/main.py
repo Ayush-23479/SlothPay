@@ -20,6 +20,15 @@ from backend.api.routes_metrics import router as metrics_router
 from backend.api.routes_passport import router as passport_router
 from backend.api.routes_payments import router as payments_router
 from backend.api.routes_webhooks import router as webhooks_router
+from backend.api.security import (
+    WEBHOOK_MAX_BYTES,
+    WEBHOOK_PATH,
+    BodySizeLimitMiddleware,
+    RateLimitMiddleware,
+    SecurityHeadersMiddleware,
+    rate_rules,
+)
+from backend.api.security import router as session_router
 from backend.config.observability import init_observability
 from backend.config.settings import get_settings
 from backend.notifications.hub import close_hub, get_hub, get_redis
@@ -55,13 +64,26 @@ def create_app() -> FastAPI:
     settings = get_settings()
     init_observability(settings)  # Sentry; a no-op while SENTRY_DSN is empty
 
+    hosted = settings.ENV in {"demo", "production"}
     app = FastAPI(
         title="SlothPay",
         version="0.1.0",
         lifespan=lifespan,
+        # No public API explorer on a hosted demo.
+        docs_url=None if hosted else "/docs",
+        redoc_url=None if hosted else "/redoc",
+        openapi_url=None if hosted else "/openapi.json",
     )
 
-    # Only the SlothPay frontend may call the API from a browser.
+    # Middleware runs from the outside in: security headers (so even 413 and 429 carry them),
+    # CORS, request size cap, rate limits. add_middleware wraps, so they are added in reverse.
+    app.add_middleware(RateLimitMiddleware, redis_factory=get_redis, rules=rate_rules(settings))
+    app.add_middleware(
+        BodySizeLimitMiddleware,
+        max_bytes=settings.MAX_REQUEST_BYTES,
+        overrides={WEBHOOK_PATH: WEBHOOK_MAX_BYTES},
+    )
+    # Only the SlothPay frontend may call the API from a browser: one exact origin, no wildcard.
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[settings.FRONTEND_ORIGIN],
@@ -76,8 +98,10 @@ def create_app() -> FastAPI:
         ],
         expose_headers=["Idempotent-Replay", "Retry-After"],
     )
+    app.add_middleware(SecurityHeadersMiddleware, hsts=settings.secure_cookies)
     install_error_handlers(app)
 
+    app.include_router(session_router)  # Task 16: POST /api/demo-login, /api/demo-logout
     app.include_router(payment_operations_router)
     app.include_router(payments_router)  # Task 10
     app.include_router(webhooks_router)  # Task 7 receiver, mounted by Task 10

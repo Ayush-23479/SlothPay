@@ -88,7 +88,34 @@ function readableError(status: number, body: unknown): ApiRequestError {
   return new ApiRequestError(status, "error", "Something went wrong. Please try again.");
 }
 
-async function request<T>(path: string, options: RequestOptions = {}): Promise<{ data: T; headers: Headers }> {
+let loginInFlight: Promise<boolean> | null = null;
+
+/**
+ * Start (or renew) the signed demo session cookie. The server ignores the X-Owner-Id header
+ * everywhere except local development, so a hosted demo needs this cookie. The browser keeps
+ * it (HttpOnly); this code never sees it.
+ */
+export function ensureSession(): Promise<boolean> {
+  if (!loginInFlight) {
+    loginInFlight = fetch(`${API_BASE_URL}/api/demo-login`, {
+      method: "POST",
+      credentials: "include",
+      cache: "no-store",
+    })
+      .then((response) => response.ok)
+      .catch(() => false)
+      .finally(() => {
+        loginInFlight = null;
+      });
+  }
+  return loginInFlight;
+}
+
+async function request<T>(
+  path: string,
+  options: RequestOptions = {},
+  retried = false,
+): Promise<{ data: T; headers: Headers }> {
   const headers: Record<string, string> = {
     Accept: "application/json",
     ...authHeaders(options.admin),
@@ -104,6 +131,7 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<{
       body: options.body === undefined ? undefined : JSON.stringify(options.body),
       signal: options.signal,
       cache: "no-store",
+      credentials: "include",
     });
   } catch (error) {
     if (error instanceof DOMException && error.name === "AbortError") throw error;
@@ -114,6 +142,10 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<{
     data = await response.json();
   } catch {
     data = null;
+  }
+  if (response.status === 401 && !retried && !path.startsWith("/api/demo-login")) {
+    // No valid session yet (first visit, or it expired): start one and try once more.
+    if (await ensureSession()) return request<T>(path, options, true);
   }
   if (!response.ok) throw readableError(response.status, data);
   return { data: data as T, headers: response.headers };

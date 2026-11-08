@@ -1,10 +1,7 @@
-
 from __future__ import annotations
 
-import hashlib
 import hmac
 import logging
-import re
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -17,6 +14,7 @@ from redis.exceptions import RedisError
 from sqlalchemy.exc import SQLAlchemyError
 
 from backend.api.schemas import ErrorOut, EventOut, PaymentOut, RescueOut
+from backend.api.security import OWNER_COOKIE, OWNER_PATTERN, make_session, read_session
 from backend.config.settings import get_settings
 from backend.models.repository import StalePaymentVersion
 from backend.notifications.hub import EventHub, get_hub
@@ -33,9 +31,8 @@ from backend.reliability.idempotency import (
 log = logging.getLogger("slothpay.api")
 
 OWNER_HEADER = "X-Owner-Id"
-OWNER_COOKIE = "slothpay_owner"
 ADMIN_HEADER = "X-Admin-Api-Key"
-_OWNER_PATTERN = re.compile(r"[A-Za-z0-9_.@:-]{1,128}")
+_OWNER_PATTERN = OWNER_PATTERN
 
 
 # ------------------------------------------------------------------------------ errors
@@ -123,19 +120,12 @@ class Caller:
 
 
 def sign_owner(owner_id: str, secret: str) -> str:
-    """Cookie value for a demo identity: <owner>.<hmac>. Task 16 replaces this."""
-    mac = hmac.new(secret.encode(), owner_id.encode(), hashlib.sha256).hexdigest()[:32]
-    return f"{owner_id}.{mac}"
+    """Cookie value for a demo identity: a signed, expiring session token (see api/security)."""
+    return make_session(owner_id, secret)
 
 
 def _owner_from_cookie(value: str | None, secret: str) -> str | None:
-    if not value or not secret or "." not in value:
-        return None
-    owner_id, _, mac = value.rpartition(".")
-    expected = sign_owner(owner_id, secret).rpartition(".")[2]
-    if hmac.compare_digest(mac, expected) and _OWNER_PATTERN.fullmatch(owner_id):
-        return owner_id
-    return None
+    return read_session(value, secret)
 
 
 def _is_admin(key: str | None) -> bool:
@@ -145,7 +135,9 @@ def _is_admin(key: str | None) -> bool:
 
 def _caller(request: Request, admin_key: str | None, allow_admin: bool) -> Caller:
     settings = get_settings()
-    owner_id = request.headers.get(OWNER_HEADER)
+    # The X-Owner-Id header is a local-development shortcut. Outside ENV=local it is ignored,
+    # so nobody can act as someone else by typing a header: only the signed cookie counts.
+    owner_id = request.headers.get(OWNER_HEADER) if settings.owner_header_allowed else None
     if owner_id is not None and not _OWNER_PATTERN.fullmatch(owner_id):
         raise ApiError(401, "unauthorized", "Missing or invalid owner identity")
     if owner_id is None:
@@ -159,10 +151,10 @@ def _caller(request: Request, admin_key: str | None, allow_admin: bool) -> Calle
 
 
 def current_owner(request: Request) -> str:
-    """The owner making the request (demo identity for now; Task 16 hardens it).
+    """The owner making the request.
 
-    Read from the X-Owner-Id header, or from the signed `slothpay_owner` cookie, which is what
-    a browser EventSource uses because it cannot set headers."""
+    Read from the signed, expiring `slothpay_owner` session cookie (issued by POST
+    /api/demo-login). In ENV=local only, the X-Owner-Id header is accepted as well."""
     caller = _caller(request, None, allow_admin=False)
     assert caller.owner_id is not None
     return caller.owner_id
