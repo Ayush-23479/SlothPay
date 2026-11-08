@@ -121,6 +121,8 @@ async def test_an_expiring_condition_voids_the_authorization(temporal, maker):
 
     async def act(starter, intent_id, skipping, env):
         assert await starter.start(intent_id, deadline(skipping))
+        if skipping:
+            await env.sleep(timedelta(seconds=3700))
         return await env.client.get_workflow_handle(conditional_workflow_id(intent_id)).result()
 
     payment_id, result = await run(temporal, maker, paypal, act)
