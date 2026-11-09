@@ -56,6 +56,8 @@ def use_env(monkeypatch, **values):
     base.update(values)
     for name in Settings.model_fields:
         monkeypatch.delenv(name, raising=False)
+    # A developer's own .env (chaos switched on, real keys) must not leak into these tests.
+    monkeypatch.setitem(Settings.model_config, "env_file", None)
     for name, value in base.items():
         monkeypatch.setenv(name, value)
     get_settings.cache_clear()

@@ -984,3 +984,13 @@ async def test_the_real_app_mounts_the_routers_and_fails_closed_without_a_servic
     ) as http:
         response = await http.get("/api/payments", headers=OWNER_A)
     assert response.status_code == 503 and response.json()["error"] == "payments_unavailable"
+
+
+async def test_the_stream_sends_an_open_comment_straight_away(app, api):
+    """A proxy only forwards the response once the first bytes arrive, so the stream must not
+    wait for an event or the 15-second ping before it says something."""
+    mine = api.make_payment("owner-a")
+    async with SSEClient(app, f"/api/payments/{mine.id}/stream", OWNER_A) as tab:
+        await tab.wait_for(": open", timeout=1.0)
+        assert tab.status == 200
+        assert tab.text.startswith(": open"), "the open comment comes before anything else"

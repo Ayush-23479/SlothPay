@@ -2,7 +2,7 @@ import math
 from functools import lru_cache
 from urllib.parse import urlparse
 
-from pydantic import model_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 SANDBOX_ONLY_ENVS = {"demo", "production"}
@@ -65,6 +65,11 @@ class Settings(BaseSettings):
     ALLOWED_CURRENCIES: str = "USD,EUR,GBP,INR"  # Task 5: confirm INR works in the sandbox
     RECONCILIATION_DELAYS_SECONDS: str = "0.3,1,2,4,8"
 
+    # Task 17: run the recovery and webhook loops inside the API process (for a host with no
+    # background workers). Off by default: Docker Compose runs them as their own containers.
+    RUN_BACKGROUND_WORKERS: bool = False
+    BACKGROUND_WORKER_INTERVAL_SECONDS: float = 5.0
+
     @property
     def owner_header_allowed(self) -> bool:
         """The X-Owner-Id header is a local-development shortcut. Anywhere else the identity
@@ -89,8 +94,29 @@ class Settings(BaseSettings):
             float(value.strip()) for value in self.RECONCILIATION_DELAYS_SECONDS.split(",")
         )
 
+    @field_validator("DATABASE_URL", mode="before")
+    @classmethod
+    def _use_the_async_driver(cls, value: object) -> object:
+        """Hosts such as Render hand out postgres:// or postgresql:// URLs. The app and the
+        migrations need the asyncpg driver, and asyncpg spells libpq's sslmode as ssl."""
+        if not isinstance(value, str):
+            return value
+        url = value.strip()
+        for prefix in ("postgres://", "postgresql://"):
+            if url.startswith(prefix):
+                url = "postgresql+asyncpg://" + url[len(prefix) :]
+                break
+        if url.startswith("postgresql+asyncpg://"):
+            url = url.replace("?sslmode=", "?ssl=").replace("&sslmode=", "&ssl=")
+        return url
+
     @model_validator(mode="after")
     def _refuse_unsafe_configuration(self) -> "Settings":
+        if not (
+            math.isfinite(self.BACKGROUND_WORKER_INTERVAL_SECONDS)
+            and 1 <= self.BACKGROUND_WORKER_INTERVAL_SECONDS <= 300
+        ):
+            raise ValueError("BACKGROUND_WORKER_INTERVAL_SECONDS must be between 1 and 300.")
         if self.ENV not in KNOWN_ENVS:
             raise ValueError(f"Refusing to start: ENV must be one of {sorted(KNOWN_ENVS)}.")
         if self.ENV in SANDBOX_ONLY_ENVS and not _is_paypal_sandbox_url(self.PAYPAL_BASE_URL):

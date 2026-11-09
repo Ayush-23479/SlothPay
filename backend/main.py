@@ -32,6 +32,7 @@ from backend.api.security import router as session_router
 from backend.config.observability import init_observability
 from backend.config.settings import get_settings
 from backend.notifications.hub import close_hub, get_hub, get_redis
+from backend.orchestration.inprocess_workers import BackgroundWorkers
 from backend.payments.paypal_client import PayPalClient
 
 
@@ -51,9 +52,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         starter=LazyWorkflowStarter(),
         settings=settings,
     )
+    workers: BackgroundWorkers | None = None
+    if settings.RUN_BACKGROUND_WORKERS:
+        workers = BackgroundWorkers(settings.BACKGROUND_WORKER_INTERVAL_SECONDS)
+        workers.start()
     try:
         yield
     finally:
+        if workers is not None:
+            await workers.stop()
         app.state.payment_api = None
         app.state.session_factory = None
         await close_hub()

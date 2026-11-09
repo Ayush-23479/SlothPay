@@ -1,147 +1,269 @@
 # SlothPay
 
-**Sandbox-only payment orchestration for SmartPay, ConditionalPay, and safer recovery from uncertain provider outcomes.**
+**A payment-safety layer for PayPal: no double charges, no guessing when an answer is lost, and a
+clear record of what really happened.** Built for the PayPal hackathon. **Sandbox only: no real
+money ever moves.**
 
-SlothPay is a FastAPI/PostgreSQL application built around the PayPal Sandbox. Its goal is to prevent duplicate financial operations and maintain auditable payment state when requests are repeated, a worker crashes, or the provider's response is ambiguous.
+> **Try it:** hosted demo at `https://slothpay-web.onrender.com` (the first load after a quiet
+> period can take about a minute while the free host wakes up). Use the PayPal sandbox buyer
+> account described in [How to log in as the sandbox buyer](#how-to-log-in-as-the-sandbox-buyer).
+> *(Replace this link with the real address after deploying: see `docs/deploy.md`.)*
 
-> **Project status:** Active development. Database ledger, payment state rules, PayPal Sandbox gateway, and Task 6 orchestration are implemented and locally tested. Task 5 idempotency review, provider-state reconciliation, full Sandbox acceptance, and further workflow integration remain open. **Not for live payments.**
+## The problem
 
-## Payment flows
+A buyer taps Pay on a slow connection. PayPal takes the money, but the answer is lost on the way
+back. The buyer sees an error and taps Pay again. Now there are two charges, or money sits frozen
+between them, or a merchant ships against a payment nobody confirmed.
 
-| Flow | Intended behavior | Current boundary |
-| --- | --- | --- |
-| **SmartPay** | Create a PayPal order, independently verify buyer approval, then capture | Orchestration and internal API implemented; end-to-end Sandbox verification pending |
-| **ConditionalPay** | Create an authorization order, verify approval, authorize, then capture or void when the applicable condition is trusted | Authorization and guarded operations implemented; HTTP condition-based capture remains blocked pending trusted condition evaluation |
+SlothPay sits between the checkout and PayPal and makes three promises:
 
-## Safety model
+1. **A money move never happens twice.** A repeated tap or a retry finds the same payment.
+2. **Nothing is guessed.** If an answer is lost, the payment is marked uncertain and SlothPay asks
+   PayPal what happened instead of charging again.
+3. **The truth is visible.** Buyer and merchant see a plain status, the one safe next step, and a
+   tamper-proof history.
 
-- **PayPal Sandbox only.** The gateway is designed for the sandbox endpoint, not live financial transactions.
-- **Durable operation attempts.** A `PaymentAttempt` and an exclusive payment-state claim are committed before financial operations are sent to PayPal.
-- **Concurrency control.** PostgreSQL compare-and-swap state transitions and unique request IDs help ensure competing operations cannot both execute.
-- **Evidence-backed approval.** Buyer approval comes from PayPal's order details, not a frontend flag.
-- **No blind charge retries.** `STARTED`, `NOT_SENT`, or `UNCERTAIN` attempts require investigation and provider-state reconciliation before any further action.
-- **Append-only audit history.** Database-side protection prevents normal UPDATE and DELETE against the payment audit ledger.
-- **Limited internal API.** Existing Task 6 endpoints are admin-only development endpoints; they do not provide merchant authentication or a public production-ready API.
+## What it does
 
-**Important:** Stable request-ID behavior is currently implemented within the orchestration layer; the final Task 5 duplicate-protection contract is still under review. Do not change request IDs associated with previously recorded attempts.
+- **SmartPay.** Pay now, safe against double clicks, retries and lost answers.
+- **ConditionalPay.** The buyer's funds are held (authorized). The owner marks the condition met
+  (the funds are captured) or not met (the hold is voided). Silence never captures.
+- **Duplicate protection.** Idempotency keys, a lock, an open-payment check, stable PayPal request
+  ids, and a database claim so two racing requests cannot both move money.
+- **Lost-answer recovery.** An unknown outcome becomes `UNCERTAIN` and is checked against PayPal
+  at growing delays until the real state is known.
+- **Rescue.** For a payment that needs a person, the dashboard offers only the actions that are
+  safe for its current state.
+- **Trust Passport.** A shareable, signed summary of what happened to a payment.
+- **Live dashboard.** Statuses update as they change; the safety numbers show payments, checks in
+  progress, recoveries and duplicates stopped.
+- **Webhooks.** PayPal's signed events are verified, stored once and applied.
+- **Break it on purpose.** A sandbox-only panel that drops an answer, slows PayPal down or runs a
+  double-click test, so you can watch SlothPay recover.
+- **Optional AI explanations.** Plain-language help that only reads masked facts and never moves
+  money. Without a model configured, fixed text is used.
+- **Security.** Signed session cookies, rate limits, a request size cap, security headers, and
+  refusal to start with an unsafe configuration in demo or production.
 
-## Tech stack
+## Architecture
 
-- **Backend:** Python 3.12, FastAPI, SQLAlchemy async, Alembic
-- **Data stores:** PostgreSQL 16, Redis 7
-- **Payment provider:** PayPal REST APIs (Sandbox)
-- **Frontend:** Next.js
-- **Planned / in-progress:** Temporal workflows, trusted condition verification, webhooks, reconciliation and AI-assisted analysis
-- **Testing:** pytest, pytest-asyncio, Ruff
+![SlothPay architecture](docs/images/architecture.svg)
 
-## Local setup (Windows PowerShell)
+The layers, the two payment paths, the status model, how duplicates are stopped and how a lost
+answer is recovered are explained in [`docs/architecture.md`](docs/architecture.md). The rules for
+the state machine are in [`docs/state-machine-contract.md`](docs/state-machine-contract.md).
 
-Prerequisites: Python 3.12, Docker Desktop, Node.js/npm, and (for PayPal API calls) PayPal Sandbox app credentials.
+## What is real and what is simulated
 
-```powershell
-# From the repository root
-py -3.12 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
-Copy-Item .env.example .env    # edit .env locally; never commit it
+| Part | Real or simulated |
+| --- | --- |
+| PayPal calls from the dashboard and the hosted demo | **Real PayPal sandbox.** Test accounts only; no real money. |
+| `tests/fake_paypal` and `scripts/stress_fake.py` | **A local simulator** that mimics the few PayPal endpoints SlothPay uses. It exists only for bulk stress tests and the Task 15 scenarios. Every number it produces says so. |
+| Timings in the Safety numbers | **Sandbox timings.** Real PayPal will differ. |
+| The AI explanations | Real model output when configured, otherwise fixed text. |
 
-docker compose up -d postgres redis
-.\.venv\Scripts\python.exe -m alembic upgrade head
+The fake PayPal shows that SlothPay's own logic does not duplicate payments. It says nothing about
+real PayPal. The only test that reports real sandbox behaviour is the manual one (see
+[How to run the tests](#how-to-run-the-tests)), and it needs a person to approve the payment.
 
-# Run backend in another terminal
-.\.venv\Scripts\python.exe -m uvicorn backend.main:app --reload
-```
+## Quick start (Docker Compose)
 
-The health endpoint is `http://localhost:8000/health`. Your `.env` must use the local sandbox configuration. The admin-only Task 6 routes additionally require a strong, private `ADMIN_API_KEY`. Keep these routes on a private network.
+You need Docker Desktop, Node.js 20 or newer (for the dashboard) and a PayPal **Sandbox** app
+(developer.paypal.com, Apps & Credentials, Sandbox).
 
-Start the frontend separately:
+```bash
+# 1. Settings
+cp .env.example .env
+#    Open .env and set PAYPAL_CLIENT_ID and PAYPAL_CLIENT_SECRET (sandbox values).
+#    Set ADMIN_API_KEY and PASSPORT_SIGNING_SECRET to random strings of 32+ characters:
+python3 -c "import secrets; print(secrets.token_urlsafe(48))"
 
-```powershell
-Set-Location frontend
+# 2. Database, Redis, Temporal, migrations and the API (http://localhost:8000)
+docker compose up -d --build
+
+# 3. The dashboard (http://localhost:3000)
+cd frontend
+cp .env.example .env.local
 npm install
 npm run dev
 ```
 
-Open `http://localhost:3000`.
+Open http://localhost:3000. If the page shows "connection refused" messages, the API is not
+running: check `docker compose ps`.
 
-## Tests
+**With the background workers.** The recovery worker (checks uncertain payments) and the webhook
+worker (applies PayPal events) run as extra containers:
 
-Run integration tests **only against a disposable, migrated local PostgreSQL database**. Some integration tests commit rows and do not clean them up automatically.
+```bash
+docker compose --profile workers up -d --build
+```
+
+**Break-it-on-purpose panel.** In `.env` set `CHAOS_ENABLED=true`, then put the same value as
+`ADMIN_API_KEY` into `frontend/.env.local` as `NEXT_PUBLIC_ADMIN_API_KEY`, and restart. The panel
+appears on the dashboard. Without it the dashboard logs one harmless `404` for `/api/chaos`.
+
+**Windows.** Use `copy .env.example .env` and `python` instead of `cp` and `python3`. Everything
+else is the same.
+
+## How to log in as the sandbox buyer
+
+PayPal creates sandbox test accounts for you. They are not real people and hold no real money.
+
+1. Go to developer.paypal.com, **Testing tools**, **Sandbox accounts**.
+2. Open the **Personal** (buyer) account. Its email and password are shown there.
+3. In the dashboard, create a SmartPay payment of a small amount and press **Create payment**.
+4. When PayPal's page opens, sign in with that **sandbox buyer** email and password and approve.
+5. You return to the dashboard and the payment completes.
+
+Never use a real PayPal account. Never paste real or sandbox secrets into an issue or a pull
+request.
+
+## How to run the demo
+
+The 3-minute script is in [`docs/demo-script.md`](docs/demo-script.md): the frozen-money story,
+SmartPay, ConditionalPay with a verified condition, lost-answer recovery with the chaos panel, the
+double-click test and the Trust Passport.
+
+## Environment
+
+Backend settings (`.env`, read by `backend/config/settings.py`):
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `ENV` | `local` | `local`, `sandbox`, `demo` or `production`. `demo` and `production` enforce the safety guards. |
+| `DATABASE_URL` | local PostgreSQL | `postgresql+asyncpg://...`. A plain `postgres://` or `postgresql://` URL from a host is accepted too. |
+| `REDIS_URL` | `redis://localhost:6379/0` | Duplicate lock, rate limits and live updates. |
+| `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET` | empty | Sandbox app credentials. |
+| `PAYPAL_BASE_URL` | PayPal sandbox | Must be the sandbox. The client refuses any other address. |
+| `PAYPAL_WEBHOOK_ID` | empty | Needed to verify webhooks. Without it every webhook is rejected. |
+| `FRONTEND_ORIGIN` | `http://localhost:3000` | Where PayPal sends the buyer back; also the one allowed CORS origin. |
+| `PASSPORT_SIGNING_SECRET` | empty | Signs share links and session cookies. 32+ random characters in demo and production. |
+| `ADMIN_API_KEY` | empty | Protects the chaos controls. 32+ random characters in demo and production. |
+| `CHAOS_ENABLED` | `false` | Controlled failures. Refused in demo and production. |
+| `SESSION_TTL_HOURS` | `12` | Life of the session cookie. |
+| `DEMO_USERS` | `alice,bob,carol` | Named identities the demo login may issue. |
+| `RATE_LIMIT_PAYMENTS_PER_MINUTE` | `30` | Per client address. |
+| `RATE_LIMIT_WEBHOOK_PER_MINUTE` | `300` | Per client address. |
+| `RATE_LIMIT_LOGIN_PER_MINUTE` | `20` | Per client address. |
+| `MAX_REQUEST_BYTES` | `65536` | Request body cap (the webhook route allows 256 KB). |
+| `CONDITION_MAX_HOURS` | `48` | Longest ConditionalPay wait. |
+| `ALLOWED_CURRENCIES` | `USD,EUR,GBP,INR` | Currencies the form accepts. |
+| `RECONCILIATION_DELAYS_SECONDS` | `0.3,1,2,4,8` | Delays between checks of an uncertain payment. |
+| `RUN_BACKGROUND_WORKERS` | `false` | Run the recovery and webhook loops inside the API (for hosts with no workers). |
+| `BACKGROUND_WORKER_INTERVAL_SECONDS` | `5` | Seconds between rounds of those loops (1 to 300). |
+| `TEMPORAL_ADDRESS`, `TEMPORAL_NAMESPACE` | `localhost:7233`, `default` | Optional Temporal server for the ConditionalPay timer. |
+| `SENTRY_DSN` | empty | Optional error reporting. Sensitive values are scrubbed. |
+| `GEMMA_BASE_URL`, `GEMMA_API_KEY`, `GEMMA_MODEL` | empty | Optional AI model (an OpenAI-style chat endpoint). Empty means fixed text. |
+
+Frontend settings (`frontend/.env.local`, read when the dashboard is built; visible in the
+browser, so never put a secret in them):
+
+| Variable | Meaning |
+| --- | --- |
+| `NEXT_PUBLIC_API_BASE_URL` | Where the browser finds the API. Empty means the same site (used when `BACKEND_URL` is set). |
+| `NEXT_PUBLIC_USE_MOCKS` | `true` runs the dashboard on fake data with no API. |
+| `NEXT_PUBLIC_ADMIN_API_KEY` | Only for the local chaos panel. Must equal `ADMIN_API_KEY`. |
+| `BACKEND_URL` | Build-time only. When set, the dashboard forwards `/api/...` to this address. Used for hosting. |
+
+## Deploying
+
+[`docs/deploy.md`](docs/deploy.md) has the step-by-step guide for Render, including the PayPal
+webhook events, the free-plan limits (sleep, hours, database expiry), the Temporal decision, and
+how to keep the demo available until judging ends. `render.yaml` is the Blueprint.
+
+## How to run the tests
+
+Run from the repository root with the virtual environment active. Integration tests create and
+drop their own throw-away databases, but they need a **local** PostgreSQL (and Redis for the
+Compose stack). They refuse to run against a remote database.
+
+macOS and Linux:
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt -r requirements-dev.txt
+docker compose up -d postgres redis
+export REDIS_URL=redis://localhost:6380/0
+export SLOTHPAY_RUN_DB_TESTS=1
+export PASSPORT_SIGNING_SECRET=$(python -c "import secrets; print(secrets.token_urlsafe(48))")
+alembic upgrade head
+python -m pytest -q tests/unit tests/integration
+python -m ruff check backend tests scripts database
+python scripts/scan_secrets.py
+```
+
+Windows PowerShell:
 
 ```powershell
 $env:SLOTHPAY_RUN_DB_TESTS = "1"
 .\.venv\Scripts\python.exe -m pytest -q -rs tests/unit tests/integration
-.\.venv\Scripts\python.exe -m ruff check backend tests
-Remove-Item Env:SLOTHPAY_RUN_DB_TESTS -ErrorAction SilentlyContinue
+.\.venv\Scripts\python.exe -m ruff check backend tests scripts database
 ```
-
-**Last verified result (Task 6 branch, October 2026):** 241 unit/integration tests passed with one third-party Starlette deprecation warning; Ruff passed. This result does not establish live PayPal Sandbox end-to-end acceptance.
-
-## How to run the tests
-
-Everything below runs from the repository root with the virtual environment active. Integration tests create and drop their own throw-away databases, but they need a **local** PostgreSQL (and Redis for the Compose stack). They refuse to run against a remote database.
 
 | What | Command |
 | --- | --- |
-| Unit tests (fast, no services) | `.\.venv\Scripts\python.exe -m pytest -q tests/unit` |
-| Integration tests, including the Task 15 scenarios | `$env:SLOTHPAY_RUN_DB_TESTS = "1"` then `.\.venv\Scripts\python.exe -m pytest -q -rs tests/integration` |
-| One Task 15 scenario file | `.\.venv\Scripts\python.exe -m pytest -q tests/integration/test_lost_answer.py` |
-| Stress run against the fake PayPal (100 payments) | `.\.venv\Scripts\python.exe scripts/stress_fake.py` |
-| Same, different seed or size | `.\.venv\Scripts\python.exe scripts/stress_fake.py --payments 300 --seed 7` |
-| Real sandbox, human approves the buyer step | `$env:SLOTHPAY_RUN_SANDBOX = "1"` then `.\.venv\Scripts\python.exe -m pytest -s tests/e2e/test_sandbox_manual.py` |
-| Lint | `.\.venv\Scripts\python.exe -m ruff check backend tests scripts` |
-| Frontend | `cd frontend`, then `npm run lint` and `npm run build` |
+| Unit tests (fast, no services) | `python -m pytest -q tests/unit` |
+| One scenario file | `python -m pytest -q tests/integration/test_lost_answer.py` |
+| Stress run against the fake PayPal (100 payments, **simulator**) | `python scripts/stress_fake.py` |
+| Same, other seed or size | `python scripts/stress_fake.py --payments 300 --seed 7` |
+| Real sandbox, a person approves the buyer step | `SLOTHPAY_RUN_SANDBOX=1 python -m pytest -s tests/e2e/test_sandbox_manual.py` |
+| Check your PayPal sandbox credentials | `python scripts/check_paypal.py` |
+| Frontend | `cd frontend && npm run lint && npm run build` |
 
-The `SLOTHPAY_RUN_*` variables apply only to the current PowerShell window; clear them with `Remove-Item Env:SLOTHPAY_RUN_DB_TESTS`. Temporal tests are skipped unless `TEMPORAL_TEST_ADDRESS` points at a running dev server, and a skipped test is not a passed test.
+**Expected result.** The suite ends with every test passing except one marked `xfail`: a declined
+capture is not yet shown as "ask the buyer for a new method". It is recorded as an expected
+failure in `tests/integration/test_smartpay_flow.py`. A skipped test is not a passed test:
+Temporal tests are skipped unless `TEMPORAL_TEST_ADDRESS` points at a running dev server.
 
-**The fake PayPal (`tests/fake_paypal/app.py`).** A small FastAPI app that mimics only the PayPal endpoints SlothPay uses. It replays the stored answer for a repeated `PayPal-Request-Id`, supports the order states CREATED, APPROVED, COMPLETED and VOIDED, can delay, drop an answer after the work is done, or return 503 at random from a fixed seed, and reports counts of orders and captures at `GET /_stats`. The real `PayPalClient` talks to it in-process through `httpx.ASGITransport`. `PAYPAL_BASE_URL` is **not** used, because the client refuses every URL except the exact PayPal sandbox host and that safeguard stays on.
+## Security
 
-**Reading the results honestly.** Anything produced with the fake PayPal is a *simulator* result and says so in its output. It shows that SlothPay's own logic does not duplicate payments. It says nothing about the real PayPal sandbox. The manual sandbox test is the only place that reports real sandbox behaviour, and it needs a person to approve the payment.
-
-## Security checks
-
-```bash
-python scripts/scan_secrets.py     # secrets scan, exit 1 on a hit
-```
-
-See `docs/TASK16_SECURITY.md` for what is enforced and the deployment caveats. After pulling Task 16 run `alembic upgrade head` once on your local database.
+Run `python scripts/scan_secrets.py` before every push (it exits 1 on a hit and never prints the
+secret). What is enforced, and the caveats for deploying, are in
+[`docs/TASK16_SECURITY.md`](docs/TASK16_SECURITY.md). After pulling a change that adds a migration,
+run `alembic upgrade head` on your local database.
 
 ## Repository layout
 
-| Path | Responsibility |
+| Path | What is there |
 | --- | --- |
-| `backend/config` | Environment-based settings and sandbox safeguards |
-| `backend/models` | Payments, operation attempts, provider events, and audit ledger |
-| `backend/state_machine` | States, policy rules, and transition guards |
-| `backend/payments` | Low-level PayPal Sandbox client |
-| `backend/orchestration` | SmartPay, ConditionalPay, claims, lifecycle, and recovery inspection |
-| `backend/api` | Internal HTTP endpoints |
-| `backend/webhooks` | PayPal webhook handling (on its dedicated feature branch until merged) |
-| `backend/reliability` | Idempotency and reconciliation work |
-| `backend/workflows` | Planned Temporal workflows |
-| `database` | Alembic migrations and SQL |
-| `frontend` | Next.js application |
-| `tests` | Unit and PostgreSQL integration tests |
+| `backend/api` | HTTP routes, sessions, rate limits, request limits, security headers |
+| `backend/state_machine` | The pure rules: statuses, legal moves, safe actions |
+| `backend/orchestration` | Runs a money move in the safe order; recovery; the optional in-API workers |
+| `backend/reliability` | Request ids, duplicate lock, reconciliation, rescue, chaos switches |
+| `backend/payments` | The PayPal client (sandbox address only) |
+| `backend/webhooks` | Signature check, inbox and processing of PayPal events |
+| `backend/intelligence` | Optional AI explanations, masking and fixed-text fallbacks |
+| `backend/notifications` | Live status updates |
+| `backend/workflows` | Optional Temporal workflows |
+| `backend/models`, `database` | Tables and Alembic migrations |
+| `frontend` | The Next.js dashboard and its Dockerfile |
+| `tests` | Unit tests, PostgreSQL integration tests, the fake PayPal, a manual sandbox test |
+| `scripts` | Stress runs, PayPal checks, the secrets scan |
+| `docs` | Architecture, deployment, demo script, submission text, security notes |
+| `render.yaml` | Render Blueprint for the hosted demo |
 
-## Development progress
+## AI tools used and how
 
-| Area | Status |
-| --- | --- |
-| Payment ledger and migrations | Implemented and tested |
-| State transition rules | Implemented and tested |
-| PayPal Sandbox API client | Implemented with offline tests |
-| SmartPay / ConditionalPay lifecycle | Implemented and locally tested |
-| Task 6 internal operations API | Implemented with unit tests |
-| PostgreSQL concurrency and no-replay tests | Passing |
-| Recovery inspection of unresolved attempts | Read-only implementation tested |
-| Task 5 final idempotency integration | Pending review |
-| Provider-state reconciliation and release of stuck operations | Pending |
-| Trusted conditional settlement workflow | Pending |
-| Real Sandbox end-to-end acceptance | Pending |
+- **Claude (Anthropic).** Used as a coding assistant to write and review code, tests and
+  documentation from a task plan. Every change was run against the test suite and read by a
+  person before it was committed.
+- **Gemma (optional, at run time).** Explains a payment or an error in plain words and reads an
+  invoice into a draft. It sees only masked facts, its answer must match a fixed schema, and it
+  can only name actions the state machine already allows. It never decides a money move. The app
+  works without it.
 
-## Security and operational limits
+*(Edit this list to match exactly what your team used.)*
 
-This repository is **not a production payment service**. Never commit `.env`, PayPal credentials, access tokens, or admin keys. Never expose internal admin endpoints directly to the public internet. Do not automatically retry an ambiguous capture or assume that a local timeout means PayPal did not process it. Preserve historical payment-attempt IDs and audit records during future integrations.
+## Limits you should know about
+
+- Sandbox only. Do not use it for live payments.
+- A declined capture is not yet classified as "ask the buyer for a new method" (see above).
+- If the answer to *create order* is lost, there is no PayPal order to look up, so that payment can
+  stay uncertain (about 1 in 10 in the simulator stress run).
+- The hosted demo runs without Temporal, so a ConditionalPay deadline does not expire by itself
+  there. The owner presses **Verify: condition met** or **Fail: condition not met**. See
+  `docs/deploy.md`.
 
 ## License
 
-See [LICENSE](LICENSE), if present in the repository.
+MIT. See [`LICENSE`](LICENSE).
