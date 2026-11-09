@@ -1,5 +1,3 @@
-"""Fixtures shared by unit and integration tests."""
-
 import os
 
 import pytest
@@ -8,6 +6,20 @@ from temporalio.client import Client
 from temporalio.testing import WorkflowEnvironment
 
 _STATE: dict = {}
+
+
+@pytest.fixture(autouse=True)
+def _no_chaos_from_the_developers_machine(monkeypatch):
+    """A PayPalClient built without an injector asks default_injector(), which turns chaos on
+    when the developer's own .env says CHAOS_ENABLED=true and then reads the chaos state from
+    the live local Redis. A mode armed in the dashboard ("Kill network") would then break an
+    unrelated test. Tests get no chaos unless they install an injector themselves."""
+    from backend.payments import hooks, paypal_client
+
+    monkeypatch.setattr(paypal_client, "default_injector", lambda: hooks._override or hooks.NOOP)
+    yield
+
+
 _SKIP = "Temporal test server unavailable; set TEMPORAL_TEST_ADDRESS to a running dev server"
 
 

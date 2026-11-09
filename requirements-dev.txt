@@ -4,3 +4,4 @@ pytest-asyncio==1.4.1.post1
 respx==0.23.1
 fakeredis==2.40.0
 ruff==0.17.2
+PyYAML==6.0.3

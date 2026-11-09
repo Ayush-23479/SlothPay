@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Annotated
+from collections.abc import AsyncIterator
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Header, Query, Response
 from sse_starlette.sse import EventSourceResponse
@@ -187,14 +188,22 @@ async def stream_payment(
     async def fetch_payment() -> PaymentOut | None:
         return await api.get_payment(owner, payment_id)
 
-    return EventSourceResponse(
-        payment_event_stream(
+    async def messages() -> AsyncIterator[dict[str, Any]]:
+        # One comment line right away. A proxy (the hosted frontend forwards /api to this
+        # service) only passes the response headers on with the first bytes, so without it a
+        # tab would wait for the first event or the 15-second ping before it counts as live.
+        yield {"comment": "open"}
+        async for message in payment_event_stream(
             hub=hub,
             intent_id=str(payment_id),
             fetch_events=fetch_events,
             fetch_payment=fetch_payment,
             cursor=cursor,
-        ),
+        ):
+            yield message
+
+    return EventSourceResponse(
+        messages(),
         ping=HEARTBEAT_SECONDS,
         headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
     )

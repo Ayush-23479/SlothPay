@@ -1,0 +1,145 @@
+# Render Blueprint for the SlothPay demo. SANDBOX ONLY: no real money moves.
+# Steps and the reasoning behind every choice are in docs/deploy.md.
+#
+# What this creates (all on Render's free plans):
+#   slothpay-db     PostgreSQL
+#   slothpay-redis  Key Value (Redis-compatible): duplicate lock, rate limits, live updates
+#   slothpay-api    the FastAPI backend (Docker, repo-root Dockerfile)
+#   slothpay-web    the Next.js dashboard (Docker, frontend/Dockerfile)
+#
+# Free-plan limits that matter (checked against Render's docs, see docs/deploy.md):
+#   - a free web service sleeps after 15 minutes without traffic and takes about a minute to wake;
+#   - a free PostgreSQL database EXPIRES 30 days after it is created;
+#   - the free Key Value store keeps nothing across restarts;
+#   - there are no background workers on the free plan, so the two small worker loops run inside
+#     the API (RUN_BACKGROUND_WORKERS) and the Temporal worker is left out.
+
+databases:
+  - name: slothpay-db
+    plan: free
+    databaseName: slothpay
+    user: slothpay
+
+services:
+  - type: keyvalue
+    name: slothpay-redis
+    plan: free
+    # Never throw keys away to make room: they hold duplicate-protection locks.
+    maxmemoryPolicy: noeviction
+    # An empty list allows only Render-internal connections.
+    ipAllowList: []
+
+  - type: web
+    name: slothpay-api
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    # A free service has no pre-deploy step, so migrations run first on every start. They are
+    # safe to repeat. --proxy-headers makes the rate limits see the visitor, not Render's proxy.
+    dockerCommand: >-
+      sh -c "python -m alembic upgrade head &&
+      exec uvicorn backend.main:app --host 0.0.0.0 --port $PORT
+      --proxy-headers --forwarded-allow-ips='*'"
+    envVars:
+      # "demo" turns on every Task 16 guard: sandbox-only PayPal host, 32+ character secrets,
+      # no chaos mode, secure cookies, no API docs, X-Owner-Id header ignored.
+      - key: ENV
+        value: demo
+      - key: DATABASE_URL
+        fromDatabase:
+          name: slothpay-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: slothpay-redis
+          property: connectionString
+      # The public address of the dashboard. PayPal sends the buyer back here. If Render gives
+      # the web service a different address (a name suffix), change this and redeploy.
+      - key: FRONTEND_ORIGIN
+        value: https://slothpay-web.onrender.com
+      - key: PAYPAL_BASE_URL
+        value: https://api-m.sandbox.paypal.com
+      - key: PAYPAL_CLIENT_ID
+        sync: false
+      - key: PAYPAL_CLIENT_SECRET
+        sync: false
+      - key: PAYPAL_WEBHOOK_ID
+        sync: false
+      # Render generates a random 256-bit value for each of these on first deploy.
+      - key: PASSPORT_SIGNING_SECRET
+        generateValue: true
+      - key: ADMIN_API_KEY
+        generateValue: true
+      - key: CHAOS_ENABLED
+        value: "false"
+      - key: RUN_BACKGROUND_WORKERS
+        value: "true"
+      # Judges share one address on a hosted demo, so the per-address limits are looser.
+      - key: RATE_LIMIT_LOGIN_PER_MINUTE
+        value: "120"
+      - key: RATE_LIMIT_PAYMENTS_PER_MINUTE
+        value: "90"
+      # Optional. Leave empty to run without them (the AI falls back to fixed text).
+      - key: SENTRY_DSN
+        sync: false
+      - key: GEMMA_BASE_URL
+        sync: false
+      - key: GEMMA_API_KEY
+        sync: false
+      - key: GEMMA_MODEL
+        sync: false
+
+  - type: web
+    name: slothpay-web
+    runtime: docker
+    plan: free
+    dockerfilePath: ./frontend/Dockerfile
+    dockerContext: ./frontend
+    envVars:
+      # Render passes these to the image build as build arguments (see frontend/Dockerfile).
+      # The dashboard forwards /api/... to the API, so the login cookie stays first-party.
+      # If the API gets a different address, change this and redeploy (it is baked in).
+      - key: BACKEND_URL
+        value: https://slothpay-api.onrender.com
+      - key: NEXT_PUBLIC_API_BASE_URL
+        value: ""
+      - key: NEXT_PUBLIC_USE_MOCKS
+        value: "false"
+
+  # ---- OPTIONAL, PAID: the Temporal worker --------------------------------------------------
+  # Background workers are not available on the free plan, and the worker needs a Temporal
+  # server it can reach (see docs/deploy.md, "Temporal"). Uncomment only if you pay for it and
+  # have a server. Without it ConditionalPay still works; only its automatic deadline timer is
+  # off. The hosted demo does not use it.
+  #
+  # - type: worker
+  #   name: slothpay-temporal-worker
+  #   runtime: docker
+  #   plan: starter
+  #   dockerfilePath: ./Dockerfile
+  #   dockerContext: .
+  #   dockerCommand: python -m backend.workflows.worker
+  #   envVars:
+  #     - key: ENV
+  #       value: demo
+  #     - key: DATABASE_URL
+  #       fromDatabase: { name: slothpay-db, property: connectionString }
+  #     - key: REDIS_URL
+  #       fromService: { type: keyvalue, name: slothpay-redis, property: connectionString }
+  #     - key: TEMPORAL_ADDRESS
+  #       sync: false
+  #     - key: TEMPORAL_NAMESPACE
+  #       value: default
+  #     - key: PAYPAL_BASE_URL
+  #       value: https://api-m.sandbox.paypal.com
+  #     - key: PAYPAL_CLIENT_ID
+  #       sync: false
+  #     - key: PAYPAL_CLIENT_SECRET
+  #       sync: false
+  #     - key: PASSPORT_SIGNING_SECRET
+  #       sync: false
+  #     - key: ADMIN_API_KEY
+  #       sync: false

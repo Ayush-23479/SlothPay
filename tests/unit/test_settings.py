@@ -72,3 +72,20 @@ def test_get_settings_is_cached():
     get_settings.cache_clear()
     assert get_settings() is get_settings()
     get_settings.cache_clear()
+
+
+@pytest.mark.parametrize(
+    ("given", "expected"),
+    [
+        ("postgres://u:p@dpg-abc/db", "postgresql+asyncpg://u:p@dpg-abc/db"),
+        ("postgresql://u:p@dpg-abc/db", "postgresql+asyncpg://u:p@dpg-abc/db"),
+        ("postgresql+asyncpg://u:p@h/db", "postgresql+asyncpg://u:p@h/db"),
+        ("postgres://u:p@h/db?sslmode=require", "postgresql+asyncpg://u:p@h/db?ssl=require"),
+        (
+            "postgresql://u:p@h/db?x=1&sslmode=require",
+            "postgresql+asyncpg://u:p@h/db?x=1&ssl=require",
+        ),
+    ],
+)
+def test_database_url_from_a_host_gets_the_async_driver(given, expected):
+    assert make(DATABASE_URL=given).DATABASE_URL == expected
