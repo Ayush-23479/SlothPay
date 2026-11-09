@@ -65,7 +65,7 @@ def read_session(token: str | None, secret: str, *, now: float | None = None) ->
         expected = hmac.new(
             secret.encode(), _SESSION_CONTEXT + payload.encode(), hashlib.sha256
         ).digest()
-        if not hmac.compare_digest(_unb64(mac_text), expected):
+        if not mac_text.isascii() or not hmac.compare_digest(mac_text, _b64(expected)):
             return None
         owner_id, _, expiry_text = _unb64(payload).decode().rpartition(":")
         if int(expiry_text) <= (time.time() if now is None else now):
