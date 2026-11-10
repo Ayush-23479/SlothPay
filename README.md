@@ -435,26 +435,77 @@ SlothPay/
 
 ## Team
 
+### Agrima Saxena
+**Software Engineering · Applied AI · Agentic Systems**
+
 <table>
 <tr>
-<td align="center" width="50%">
-<a href="https://github.com/agcodes0315"><img src="https://github.com/agcodes0315.png" width="100" height="100" alt="Agrima Saxena"></a>
-<br><b>Agrima Saxena</b><br>
-<sub>Backend security · Task 18 signed conditions · testing, review and integration</sub>
-<br><br>
-<a href="https://github.com/agcodes0315"><img src="https://img.shields.io/badge/GitHub-181717?style=for-the-badge&logo=github&logoColor=white" alt="GitHub"></a>
-<a href="https://www.linkedin.com/in/agrima-saxena-142960426/"><img src="https://img.shields.io/badge/LinkedIn-0A66C2?style=for-the-badge&logo=linkedin&logoColor=white" alt="LinkedIn"></a>
-<a href="mailto:agrimalc@gmail.com"><img src="https://img.shields.io/badge/Email-EA4335?style=for-the-badge&logo=gmail&logoColor=white" alt="Email"></a>
+
+<td width="60">
+<a href="https://www.linkedin.com/in/agrima-saxena-142960426/" title="LinkedIn">
+<img src="https://img.icons8.com/color/48/linkedin.png"
+     width="32"
+     height="32"
+     alt="LinkedIn">
+</a>
 </td>
-<td align="center" width="50%">
-<a href="https://github.com/Ayush-23479"><img src="https://github.com/Ayush-23479.png" width="100" height="100" alt="Ayush Verma"></a>
-<br><b>Ayush Verma</b><br>
-<sub>Task 19 payment timing · comparison dashboard · backend instrumentation and tests</sub>
-<br><br>
-<a href="https://github.com/Ayush-23479"><img src="https://img.shields.io/badge/GitHub-181717?style=for-the-badge&logo=github&logoColor=white" alt="GitHub"></a>
-<a href="https://www.linkedin.com/in/ayush-verma-1112a0260/"><img src="https://img.shields.io/badge/LinkedIn-0A66C2?style=for-the-badge&logo=linkedin&logoColor=white" alt="LinkedIn"></a>
-<a href="mailto:ayushverma19171051@gmail.com"><img src="https://img.shields.io/badge/Email-EA4335?style=for-the-badge&logo=gmail&logoColor=white" alt="Email"></a>
+
+<td width="60">
+<a href="mailto:agrimalc@gmail.com" title="Email">
+<img src="https://img.icons8.com/color/48/gmail-new.png"
+     width="32"
+     height="32"
+     alt="Email">
+</a>
 </td>
+
+<td width="60">
+<a href="https://github.com/agcodes0315" title="GitHub">
+<img src="https://img.icons8.com/ios-glyphs/48/ffffff/github.png"
+     width="32"
+     height="32"
+     alt="GitHub">
+</a>
+</td>
+
+</tr>
+</table>
+
+---
+
+### Ayush Verma
+**Relay Shield · Scoring and classifier, payment policy, case state machine, family approval codes, timers and Lambda branch, Shield UI, tests and documentation. Co-built Relay Shield with Agrima.**
+
+<table>
+<tr>
+
+<td width="60">
+<a href="https://www.linkedin.com/in/ayush-verma-1112a0260/" title="LinkedIn">
+<img src="https://img.icons8.com/color/48/linkedin.png"
+     width="32"
+     height="32"
+     alt="LinkedIn">
+</a>
+</td>
+
+<td width="60">
+<a href="mailto:ayushverma19171051@gmail.com" title="Email">
+<img src="https://img.icons8.com/color/48/gmail-new.png"
+     width="32"
+     height="32"
+     alt="Email">
+</a>
+</td>
+
+<td width="60">
+<a href="https://github.com/Ayush-23479" title="GitHub">
+<img src="https://img.icons8.com/ios-glyphs/48/ffffff/github.png"
+     width="32"
+     height="32"
+     alt="GitHub">
+</a>
+</td>
+
 </tr>
 </table>
 
