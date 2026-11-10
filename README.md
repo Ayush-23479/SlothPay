@@ -1,4 +1,4 @@
-<div align="center">🦥 SlothPay
+🦥 SlothPay
 AI-Assisted Payment Safety, Conditional Payments & Failure Recovery
 A payment should never happen twice because a response arrived once too late.
 What if PayPal processed a payment, but your browser never received the confirmation?
