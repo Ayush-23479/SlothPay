@@ -51,6 +51,7 @@ class Settings(BaseSettings):
     CHAOS_ENABLED: bool = False  # controlled failures; sandbox/local only
     ADMIN_API_KEY: str = ""
     PASSPORT_SIGNING_SECRET: str = ""
+    CONDITION_WEBHOOK_SECRET: str = ""
 
     # --- used by later tasks (kept here so there is one settings file) ---
     # --- Task 16: sessions, rate limits and request size ---

@@ -15,6 +15,7 @@ from backend.api.deps import install_error_handlers
 from backend.api.payment_operations import router as payment_operations_router
 from backend.api.payments_service import DbPaymentApi, LazyWorkflowStarter
 from backend.api.routes_chaos import router as chaos_router
+from backend.api.routes_extensions import router as extensions_router
 from backend.api.routes_intelligence import router as intelligence_router
 from backend.api.routes_metrics import router as metrics_router
 from backend.api.routes_passport import router as passport_router
@@ -114,7 +115,8 @@ def create_app() -> FastAPI:
     app.include_router(webhooks_router)  # Task 7 receiver, mounted by Task 10
     app.include_router(metrics_router)  # Task 12
     app.include_router(intelligence_router)  # Task 13: invoice pre-fill
-    app.include_router(passport_router)  # Task 14: Trust Passport
+    app.include_router(passport_router)
+    app.include_router(extensions_router)  # Task 14: Trust Passport
     app.include_router(chaos_router)  # Task 12: answers 404 unless chaos is allowed
 
     @app.get("/health")

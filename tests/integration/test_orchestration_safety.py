@@ -14,9 +14,7 @@ from unittest.mock import AsyncMock
 import pytest
 import pytest_asyncio
 from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from backend.config.settings import get_settings
 from backend.models import Payment, PaymentAudit
 from backend.models.repository import StalePaymentVersion
 from backend.orchestration.service import execute_payment_operation
@@ -33,12 +31,9 @@ pytestmark = [
 
 
 @pytest_asyncio.fixture
-async def maker():
-    engine = create_async_engine(get_settings().DATABASE_URL, pool_size=8)
-    try:
-        yield async_sessionmaker(engine, expire_on_commit=False)
-    finally:
-        await engine.dispose()
+async def maker(isolated_maker):
+    """Use an isolated migrated local test database."""
+    yield isolated_maker
 
 
 async def create_payment(maker, mode="SMARTPAY", status="APPROVED"):
