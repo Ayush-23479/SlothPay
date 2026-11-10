@@ -69,6 +69,9 @@ services:
       - key: PAYPAL_WEBHOOK_ID
         sync: false
       # Render generates a random 256-bit value for each of these on first deploy.
+      # Task 18: secret for signed condition verification webhooks.
+      - key: CONDITION_WEBHOOK_SECRET
+        generateValue: true
       - key: PASSPORT_SIGNING_SECRET
         generateValue: true
       - key: ADMIN_API_KEY
