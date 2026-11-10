@@ -36,12 +36,11 @@ services:
     dockerfilePath: ./Dockerfile
     dockerContext: .
     healthCheckPath: /health
-    # A free service has no pre-deploy step, so migrations run first on every start. They are
-    # safe to repeat. --proxy-headers makes the rate limits see the visitor, not Render's proxy.
-    dockerCommand: >-
-      sh -c "python -m alembic upgrade head &&
-      exec uvicorn backend.main:app --host 0.0.0.0 --port $PORT
-      --proxy-headers --forwarded-allow-ips='*'"
+    # A free service has no pre-deploy step, so scripts/start_render.sh runs the migrations first
+    # on every start (safe to repeat), then starts uvicorn with --proxy-headers so the rate
+    # limits see the visitor, not Render's proxy. It is a script because Render passed a quoted
+    # one-line "sh -c" command to the shell as a single word (error: "...: not found", status 127).
+    dockerCommand: sh /app/scripts/start_render.sh
     envVars:
       # "demo" turns on every Task 16 guard: sandbox-only PayPal host, 32+ character secrets,
       # no chaos mode, secure cookies, no API docs, X-Owner-Id header ignored.
