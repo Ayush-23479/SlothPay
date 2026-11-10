@@ -108,7 +108,67 @@ export interface Metrics {
   capture_latency_label: string;
   webhook_verify_ms_avg: number | null;
   webhook_verify_ms_p95: number | null;
+  safety_overhead_ms_p95: number | null;
+  condition_to_capture_ms_p95: number | null;
   generated_at: string;
+}
+
+// ------------------------------------------------------------------ speed (Task 19)
+export interface KindStats {
+  p50_ms: number | null;
+  p95_ms: number | null;
+}
+
+export interface StepStats extends KindStats {
+  kind: "ours" | "provider" | "human" | "wait";
+  count: number;
+}
+
+export interface SpeedRecent {
+  payment_id: string;
+  path: string;
+  amount: string;
+  currency: string;
+  created_at: string;
+  ours_ms: number;
+  provider_ms: number;
+  human_ms: number;
+}
+
+export interface Speed {
+  label: string;
+  payments: number;
+  ours: KindStats;
+  provider: KindStats;
+  human: KindStats;
+  overhead: KindStats;
+  steps: Record<string, StepStats>;
+  recent: SpeedRecent[];
+  targets: { overhead_p95_ms: number; condition_to_capture_ms: number; first_check_ms: number };
+  note: string;
+  generated_at: string;
+}
+
+export interface BaselineIn {
+  amount?: string;
+  currency?: string;
+  timeout_seconds?: number;
+}
+
+export interface BaselineResult {
+  arm: string;
+  label: string;
+  outcome: string;
+  attempts: number;
+  paypal_orders_possible: number;
+  order_ids: (string | null)[];
+  waited_ms: number;
+  provider_ms: number;
+  ours_ms: number;
+  total_ms: number;
+  timeout_seconds: number;
+  request_id_used: boolean;
+  note: string;
 }
 
 export type ChaosMode =

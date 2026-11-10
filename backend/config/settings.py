@@ -71,6 +71,10 @@ class Settings(BaseSettings):
     RUN_BACKGROUND_WORKERS: bool = False
     BACKGROUND_WORKER_INTERVAL_SECONDS: float = 5.0
 
+    # Task 19: how long the Compare page's "without SlothPay" run waits for a lost answer
+    # before it sends the request again (a typical client default).
+    BASELINE_TIMEOUT_SECONDS: float = 30.0
+
     @property
     def owner_header_allowed(self) -> bool:
         """The X-Owner-Id header is a local-development shortcut. Anywhere else the identity

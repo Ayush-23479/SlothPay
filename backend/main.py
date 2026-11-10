@@ -14,12 +14,14 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from backend.api.deps import install_error_handlers
 from backend.api.payment_operations import router as payment_operations_router
 from backend.api.payments_service import DbPaymentApi, LazyWorkflowStarter
+from backend.api.routes_baseline import router as baseline_router
 from backend.api.routes_chaos import router as chaos_router
 from backend.api.routes_extensions import router as extensions_router
 from backend.api.routes_intelligence import router as intelligence_router
 from backend.api.routes_metrics import router as metrics_router
 from backend.api.routes_passport import router as passport_router
 from backend.api.routes_payments import router as payments_router
+from backend.api.routes_speed import router as speed_router
 from backend.api.routes_webhooks import router as webhooks_router
 from backend.api.security import (
     WEBHOOK_MAX_BYTES,
@@ -34,7 +36,7 @@ from backend.config.observability import init_observability
 from backend.config.settings import get_settings
 from backend.notifications.hub import close_hub, get_hub, get_redis
 from backend.orchestration.inprocess_workers import BackgroundWorkers
-from backend.payments.paypal_client import PayPalClient
+from backend.payments.shared import SharedPayPal
 
 
 @asynccontextmanager
@@ -45,13 +47,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     engine = create_async_engine(settings.DATABASE_URL, pool_pre_ping=True)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     app.state.session_factory = session_factory
+    # Task 19: one PayPal client for the whole process (kept-alive connection, token fetched
+    # at startup and renewed before it expires) instead of a new client for every request.
+    shared_paypal = SharedPayPal()
+    await shared_paypal.start()
+    app.state.paypal_factory = shared_paypal
     app.state.payment_api = DbPaymentApi(
         session_factory=session_factory,
         redis=get_redis(),
         hub=get_hub(),
-        paypal_factory=PayPalClient,
+        paypal_factory=shared_paypal,
         starter=LazyWorkflowStarter(),
         settings=settings,
+        quick_reconcile=True,
     )
     workers: BackgroundWorkers | None = None
     if settings.RUN_BACKGROUND_WORKERS:
@@ -63,7 +71,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if workers is not None:
             await workers.stop()
         app.state.payment_api = None
+        app.state.paypal_factory = None
         app.state.session_factory = None
+        await shared_paypal.stop()
         await close_hub()
         await engine.dispose()
 
@@ -118,6 +128,8 @@ def create_app() -> FastAPI:
     app.include_router(passport_router)
     app.include_router(extensions_router)  # Task 18: Signed condition webhooks
     app.include_router(chaos_router)  # Task 12: answers 404 unless chaos is allowed
+    app.include_router(speed_router)  # Task 19: GET /api/speed
+    app.include_router(baseline_router)  # Task 19: Compare page; 404 unless chaos is allowed
 
     @app.get("/health")
     def health() -> dict:

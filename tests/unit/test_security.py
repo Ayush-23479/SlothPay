@@ -94,7 +94,9 @@ def test_a_session_signed_with_another_secret_is_rejected():
 def test_a_tampered_session_is_rejected(position):
     token = make_session("demo-alice", SECRET)
     chars = list(token)
-    chars[position] = "A" if chars[position] != "A" else "B"
+    # The last base64 character carries unused bits, so "A" -> "B" can decode to the same bytes.
+    # "A" and "_" differ in their high bits, so the change is always real.
+    chars[position] = "A" if chars[position] not in "ABCD" else "_"
     assert read_session("".join(chars), SECRET) is None
 
 

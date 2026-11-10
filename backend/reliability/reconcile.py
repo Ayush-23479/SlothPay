@@ -1,7 +1,7 @@
-
 from __future__ import annotations
 
 import asyncio
+import time
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -12,6 +12,7 @@ from sqlalchemy import select
 from backend.models.attempt import PaymentAttempt
 from backend.models.payment import Payment
 from backend.orchestration.reconcile import UNRESOLVED, reconcile_attempt
+from backend.reliability import timing
 
 # Seconds to wait before read 1..5. Five entries = at most five PayPal reads.
 RECONCILE_DELAYS: tuple[float, ...] = (0.3, 1.0, 2.0, 4.0, 8.0)
@@ -89,9 +90,11 @@ class DbReconcileStep:
             if len(attempt_ids) > 1:
                 # Never guess which of several unresolved operations an answer belongs to.
                 return StepOutcome("AMBIGUOUS", payment.status)
-            observation = await reconcile_attempt(
-                session, self._gateway, attempt_id=attempt_ids[0], force=True
-            )
+            # Every PayPal read made here is recorded as a `reconcile_read` provider step.
+            with timing.provider_label(timing.RECONCILE_READ):
+                observation = await reconcile_attempt(
+                    session, self._gateway, attempt_id=attempt_ids[0], force=True
+                )
             return StepOutcome(observation.decision, observation.payment_status)
 
 
@@ -127,7 +130,12 @@ class StatusReconciler:
         outcome = StepOutcome("UNKNOWN", "UNCERTAIN")
         checks = 0
         for delay in self._delays:
+            waited_from = time.perf_counter()
             await self._sleep(delay)
+            # The pause before each read (0.3, 1, 2, 4, 8 s) is stored as a `wait`, not overhead.
+            timing.add_step(
+                timing.RECONCILE_WAIT, timing.WAIT, (time.perf_counter() - waited_from) * 1000
+            )
             outcome = await self._step(intent_id)
             if outcome.decision in _STOP_DECISIONS:
                 break

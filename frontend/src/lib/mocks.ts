@@ -10,7 +10,9 @@ import type {
   ChaosSettings,
   DisplayStatus,
   InvoiceResult,
+  BaselineResult,
   Metrics,
+  Speed,
   Passport,
   PassportEntry,
   PassportError,
@@ -436,7 +438,61 @@ export const mockApi: Api = {
       capture_latency_label: "sandbox",
       webhook_verify_ms_avg: 212,
       webhook_verify_ms_p95: 388,
+      safety_overhead_ms_p95: 62.4,
+      condition_to_capture_ms_p95: 640,
       generated_at: iso(),
+    };
+  },
+
+  async speed(): Promise<Speed> {
+    await sleep(150);
+    const rows = load().payments.slice(0, 5);
+    return {
+      label: "sandbox",
+      payments: rows.length,
+      ours: { p50_ms: 31.2, p95_ms: 62.4 },
+      provider: { p50_ms: 812, p95_ms: 1430 },
+      human: { p50_ms: 9400, p95_ms: 21000 },
+      overhead: { p50_ms: 31.2, p95_ms: 62.4 },
+      steps: {
+        db_write: { kind: "ours", count: rows.length * 2, p50_ms: 6.1, p95_ms: 11.8 },
+        paypal_create_order: { kind: "provider", count: rows.length, p50_ms: 640, p95_ms: 1100 },
+        buyer_approval: { kind: "human", count: rows.length, p50_ms: 9400, p95_ms: 21000 },
+        reconcile_wait: { kind: "wait", count: 2, p50_ms: 300, p95_ms: 300 },
+      },
+      recent: rows.map((p, i) => ({
+        payment_id: p.id,
+        path: p.path,
+        amount: p.amount,
+        currency: p.currency,
+        created_at: p.created_at,
+        ours_ms: 28 + i * 3,
+        provider_ms: 700 + i * 90,
+        human_ms: 9000 + i * 1200,
+      })),
+      targets: { overhead_p95_ms: 100, condition_to_capture_ms: 1000, first_check_ms: 500 },
+      note: "Sandbox numbers (sample data).",
+      generated_at: iso(),
+    };
+  },
+
+  async baselinePay(body): Promise<BaselineResult> {
+    await sleep(600);
+    const timeout = body.timeout_seconds ?? 30;
+    return {
+      arm: "without_slothpay",
+      label: "sandbox",
+      outcome: "created",
+      attempts: 1,
+      paypal_orders_possible: 1,
+      order_ids: ["5O19…3R7K"],
+      waited_ms: 0,
+      provider_ms: 560,
+      ours_ms: 2,
+      total_ms: 570,
+      timeout_seconds: timeout,
+      request_id_used: false,
+      note: "Sample data (mock mode).",
     };
   },
 

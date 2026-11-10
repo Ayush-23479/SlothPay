@@ -170,6 +170,10 @@ class MetricsOut(BaseModel):
     capture_latency_label: str = "sandbox"
     webhook_verify_ms_avg: float | None = None
     webhook_verify_ms_p95: float | None = None
+    # Task 19 (sandbox figures): SlothPay's own added time per payment, and the time from
+    # "condition met" to the capture request being sent.
+    safety_overhead_ms_p95: float | None = None
+    condition_to_capture_ms_p95: float | None = None
     generated_at: datetime
 
 

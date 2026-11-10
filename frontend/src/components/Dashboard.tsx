@@ -11,6 +11,7 @@ import { ConditionPanel } from "./ConditionPanel";
 import { InvoiceUpload } from "./InvoiceUpload";
 import { LiveTimeline } from "./LiveTimeline";
 import { MetricsPanel } from "./MetricsPanel";
+import { SpeedPanel } from "./SpeedPanel";
 import { PayForm, type PayFormInitial } from "./PayForm";
 import { PaymentTable } from "./PaymentTable";
 import { RescuePanel } from "./RescuePanel";
@@ -126,6 +127,7 @@ export function Dashboard() {
 
           <div id="safety" className="space-y-8">
             <MetricsPanel refreshKey={metricsKey} />
+            <SpeedPanel refreshKey={metricsKey} />
             <ChaosPanel />
           </div>
         </div>

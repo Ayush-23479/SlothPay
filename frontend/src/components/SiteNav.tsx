@@ -36,6 +36,11 @@ export function SiteNav() {
               Safety
             </a>
           </li>
+          <li>
+            <Link href="/compare" className="hover:underline">
+              Compare
+            </Link>
+          </li>
         </ul>
         <div className="ml-auto flex items-center gap-3">
           <span className="rounded-full bg-soft px-3 py-1 text-xs font-bold uppercase tracking-wide text-ink">
