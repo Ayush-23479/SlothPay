@@ -6,6 +6,8 @@ import { mockApi } from "./mocks";
 import { getAdminKey, getOwnerId } from "./session";
 import type {
   ApiErrorBody,
+  BaselineIn,
+  BaselineResult,
   ChaosSetIn,
   ChaosSettings,
   DoubleClickIn,
@@ -20,6 +22,7 @@ import type {
   Rescue,
   RescueActionResult,
   ShareLink,
+  Speed,
 } from "./types";
 
 export class ApiRequestError extends Error {
@@ -50,6 +53,8 @@ export interface Api {
   rescuePlan(id: string): Promise<Rescue>;
   rescueAction(id: string, action: string): Promise<RescueActionResult>;
   metrics(): Promise<Metrics>;
+  speed(): Promise<Speed>;
+  baselinePay(body: BaselineIn): Promise<BaselineResult>;
   getChaos(): Promise<ChaosSettings>;
   setChaos(body: ChaosSetIn): Promise<ChaosSettings>;
   doubleClick(body: DoubleClickIn): Promise<DoubleClickResult>;
@@ -189,6 +194,8 @@ const realApi: Api = {
   rescueAction: (id, action) =>
     post<RescueActionResult>(`${base}/${encodeURIComponent(id)}/rescue`, { action }),
   metrics: () => get<Metrics>("/api/metrics"),
+  speed: () => get<Speed>("/api/speed"),
+  baselinePay: (body) => post<BaselineResult>("/api/baseline/pay", body),
   getChaos: () => get<ChaosSettings>("/api/chaos", true),
   setChaos: (body) => post<ChaosSettings>("/api/chaos", body, { admin: true }),
   doubleClick: (body) => post<DoubleClickResult>("/api/chaos/double-click", body, { admin: true }),

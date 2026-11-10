@@ -10,6 +10,7 @@ import httpx
 
 from backend.config.settings import get_settings
 from backend.payments.hooks import FailureInjector, TransportLost, default_injector
+from backend.reliability import timing
 
 SANDBOX_URL = "https://api-m.sandbox.paypal.com"
 # Task 4 rule: every PayPal call has a 3 second timeout.
@@ -165,12 +166,24 @@ class PayPalClient:
             return {}
         return data if isinstance(data, dict) else {}
 
-    async def _oauth_token(self) -> str:
-        if self._token and time.monotonic() < self._token_expiry:
+    def token_seconds_left(self) -> float:
+        """Seconds until the saved token must be replaced (0 when there is none)."""
+        if not self._token:
+            return 0.0
+        return max(0.0, self._token_expiry - time.monotonic())
+
+    async def refresh_token(self) -> str:
+        """Fetch a new token now, even if the saved one is still valid. A shared client calls
+        this in the background so no payment ever waits for the login round trip."""
+        return await self._oauth_token(force=True)
+
+    async def _oauth_token(self, *, force: bool = False) -> str:
+        if not force and self._token and time.monotonic() < self._token_expiry:
             return self._token
         async with self._token_lock:
-            if self._token and time.monotonic() < self._token_expiry:
+            if not force and self._token and time.monotonic() < self._token_expiry:
                 return self._token
+            fetch_started = time.perf_counter()
             try:
                 response = await self._http.post(
                     "/v1/oauth2/token",
@@ -198,6 +211,7 @@ class PayPalClient:
                 raise PayPalNotSent("Malformed PayPal OAuth response; request not sent") from exc
             self._token = token
             self._token_expiry = time.monotonic() + max(0, ttl - 60)
+            timing.record_provider("oauth_token", (time.perf_counter() - fetch_started) * 1000)
             return token
 
     async def check_authentication(self) -> bool:
@@ -212,6 +226,7 @@ class PayPalClient:
         json_body: dict[str, Any] | None = None,
         request_id: str | None = None,
         financial: bool = False,
+        timeout: float | None = None,
     ) -> dict[str, Any]:
         # Validate everything locally first, so bad input never causes a network call.
         if financial and not request_id:
@@ -231,12 +246,20 @@ class PayPalClient:
         except TransportLost as exc:
             # The request never left, so nothing happened and a retry is safe.
             raise PayPalNotSent("Connection lost before the request was sent") from exc
+        extra: dict[str, Any] = {} if timeout is None else {"timeout": timeout}
+        timing.note_send(operation)
+        sent_at = time.perf_counter()
         try:
-            response = await self._http.request(method, path, json=json_body, headers=headers)
+            response = await self._http.request(
+                method, path, json=json_body, headers=headers, **extra
+            )
         except httpx.RequestError as exc:
             raise PayPalOutcomeUnknown(
                 "PayPal network outcome unknown: reconcile before any retry"
             ) from exc
+        finally:
+            # How long PayPal took, kept apart from SlothPay's own time (Task 19).
+            timing.record_provider(operation, (time.perf_counter() - sent_at) * 1000)
         try:
             await self._injector.after_send(operation)
         except TransportLost as exc:
@@ -296,6 +319,33 @@ class PayPalClient:
             body["payment_source"] = {"paypal": {"experience_context": context}}
         return await self._request(
             "POST", "/v2/checkout/orders", json_body=body, request_id=request_id, financial=True
+        )
+
+    async def create_order_naive(
+        self,
+        *,
+        amount: str,
+        currency: str,
+        return_url: str | None = None,
+        timeout: float = 30.0,
+    ) -> dict[str, Any]:
+        """A deliberately UNSAFE order call for the Compare page: no PayPal-Request-Id, so a
+        repeat creates a second order, and a long timeout. It exists only to show what happens
+        without SlothPay. Nothing in the payment path calls it."""
+        body: dict[str, Any] = {
+            "intent": "CAPTURE",
+            "purchase_units": [{"amount": self._money(amount, currency)}],
+        }
+        if return_url is not None:
+            context = {
+                "return_url": self._web_url(return_url, "return_url"),
+                "cancel_url": self._web_url(return_url, "cancel_url"),
+                "user_action": "PAY_NOW",
+                "shipping_preference": "NO_SHIPPING",
+            }
+            body["payment_source"] = {"paypal": {"experience_context": context}}
+        return await self._request(
+            "POST", "/v2/checkout/orders", json_body=body, request_id=None, timeout=timeout
         )
 
     async def get_order(self, order_id: str) -> dict[str, Any]:

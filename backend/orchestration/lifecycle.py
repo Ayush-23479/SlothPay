@@ -18,6 +18,7 @@ from backend.models.reconciliation import PaymentReconciliation
 from backend.models.repository import StalePaymentVersion, add_audit_event, transition_payment
 from backend.payments.hooks import take_chaos_mode
 from backend.payments.paypal_client import PayPalError, PayPalNotSent, PayPalOutcomeUnknown
+from backend.reliability import timing
 from backend.state_machine.guards import authorization_capturable, claim_status_for
 from backend.state_machine.transitions import validate_transition
 
@@ -97,35 +98,36 @@ async def _attempt(
         status="STARTED",
     )
     try:
-        if claim_status is not None:
-            await _transition(
+        with timing.step("db_write"):
+            if claim_status is not None:
+                await _transition(
+                    session,
+                    payment,
+                    claim_status,
+                    evidence={
+                        "source": "internal_record",
+                        "confirmed": False,
+                        "operation": operation,
+                        "request_id": request_id,
+                        "phase": "claimed",
+                    },
+                )
+            session.add(attempt)
+            await session.flush()
+            await _schedule_reconciliation(session, payment, attempt)
+            await add_audit_event(
                 session,
-                payment,
-                claim_status,
+                payment_id=payment.id,
+                event_type="OPERATION_ATTEMPT_STARTED",
+                actor="orchestration",
                 evidence={
                     "source": "internal_record",
                     "confirmed": False,
                     "operation": operation,
                     "request_id": request_id,
-                    "phase": "claimed",
                 },
             )
-        session.add(attempt)
-        await session.flush()
-        await _schedule_reconciliation(session, payment, attempt)
-        await add_audit_event(
-            session,
-            payment_id=payment.id,
-            event_type="OPERATION_ATTEMPT_STARTED",
-            actor="orchestration",
-            evidence={
-                "source": "internal_record",
-                "confirmed": False,
-                "operation": operation,
-                "request_id": request_id,
-            },
-        )
-        await session.commit()
+            await session.commit()
     except (IntegrityError, StalePaymentVersion) as exc:
         await session.rollback()
         raise OperationAlreadyStarted(
@@ -223,14 +225,18 @@ async def _uncertain(
         raise LifecycleSafetyError("Committed attempt row was not found")
     attempt.status = "UNCERTAIN"
     _note_chaos(attempt)
-    report(
-        "Payment became UNCERTAIN",
-        "warning",
-        layer="safety",
-        operation=operation,
-        intent_id=str(payment.id),
-        reason=reason,
-        chaos_mode=attempt.chaos_mode,
+    # Error reporting never sits between the buyer's click and the answer (Task 19).
+    timing.after_response(
+        lambda: report(
+            "Payment became UNCERTAIN",
+            "warning",
+            layer="safety",
+            operation=operation,
+            intent_id=str(payment.id),
+            reason=reason,
+            chaos_mode=attempt.chaos_mode,
+        ),
+        "sentry-uncertain",
     )
     await add_audit_event(
         session,
@@ -350,26 +356,43 @@ async def create_order(
     ):
         await _uncertain(session, payment, attempt_id, "create_order", "unexpected_order_response")
         return {"state": "UNCERTAIN", "needs_reconciliation": True}
-    payment.paypal_order_id = order_id
-    await _transition(
-        session,
-        payment,
-        "ORDER_CREATED",
-        evidence={
-            "source": "paypal_response",
-            "confirmed": True,
-            "operation": "create_order",
-            "request_id": request_id,
-            "order_id": order_id,
-        },
-    )
-    attempt = await session.get(PaymentAttempt, attempt_id)
-    attempt.status = "SUCCEEDED"
-    _note_chaos(attempt)
-    attempt.provider_operation_id = order_id
-    await _complete_reconciliation(session, attempt_id, "PayPal order creation confirmed")
-    await session.commit()
+    with timing.step("commit_status"):
+        payment.paypal_order_id = order_id
+        await _transition(
+            session,
+            payment,
+            "ORDER_CREATED",
+            evidence={
+                "source": "paypal_response",
+                "confirmed": True,
+                "operation": "create_order",
+                "request_id": request_id,
+                "order_id": order_id,
+            },
+        )
+        attempt = await session.get(PaymentAttempt, attempt_id)
+        attempt.status = "SUCCEEDED"
+        _note_chaos(attempt)
+        attempt.provider_operation_id = order_id
+        await _complete_reconciliation(session, attempt_id, "PayPal order creation confirmed")
+        await session.commit()
     return {"state": "ORDER_CREATED", "paypal_order_id": order_id, "response": response}
+
+
+async def mark_awaiting_approval(session: AsyncSession, *, payment_id: uuid.UUID) -> str:
+    """Move a freshly created order to AWAITING_APPROVAL with NO PayPal call.
+
+    A new order cannot have been approved yet, so the GET that verify_buyer_approval makes
+    would only add a PayPal round trip to the buyer's click. Approval is still verified with
+    PayPal when the buyer comes back (verify_buyer_approval).
+    """
+    payment = await _load(session, payment_id)
+    if payment.status == "ORDER_CREATED":
+        await _transition(
+            session, payment, "AWAITING_APPROVAL", evidence={"phase": "awaiting_approval"}
+        )
+        await session.commit()
+    return payment.status
 
 
 async def verify_buyer_approval(
@@ -474,35 +497,38 @@ async def execute_operation(
     except LifecycleSafetyError:
         await _uncertain(session, payment, attempt_id, operation, "unrecognized_provider_result")
         return {"state": "UNCERTAIN", "needs_reconciliation": True}
-    await _transition(
-        session,
-        payment,
-        target,
-        evidence={
-            "source": "paypal_response",
-            "confirmed": True,
-            "operation": operation,
-            "request_id": request_id,
-            "provider_operation_id": operation_id,
-        },
-    )
-    attempt = await session.get(PaymentAttempt, attempt_id)
-    attempt.status = "PENDING" if target == "CAPTURE_PENDING" else "SUCCEEDED"
-    _note_chaos(attempt)
-    attempt.provider_operation_id = operation_id
-    if target == "CAPTURE_PENDING":
-        await _schedule_reconciliation(session, payment, attempt)
-    else:
-        await _complete_reconciliation(session, attempt_id, "PayPal operation response confirmed")
-    await session.commit()
-    # AUTHORIZED -> AWAITING_CONDITION is a separate permitted transition.
-    if target == "AUTHORIZED":
+    with timing.step("commit_status"):
         await _transition(
             session,
             payment,
-            "AWAITING_CONDITION",
-            evidence={"operation": "authorize", "phase": "awaiting_condition"},
+            target,
+            evidence={
+                "source": "paypal_response",
+                "confirmed": True,
+                "operation": operation,
+                "request_id": request_id,
+                "provider_operation_id": operation_id,
+            },
         )
+        attempt = await session.get(PaymentAttempt, attempt_id)
+        attempt.status = "PENDING" if target == "CAPTURE_PENDING" else "SUCCEEDED"
+        _note_chaos(attempt)
+        attempt.provider_operation_id = operation_id
+        if target == "CAPTURE_PENDING":
+            await _schedule_reconciliation(session, payment, attempt)
+        else:
+            await _complete_reconciliation(
+                session, attempt_id, "PayPal operation response confirmed"
+            )
         await session.commit()
-        target = "AWAITING_CONDITION"
+        # AUTHORIZED -> AWAITING_CONDITION is a separate permitted transition.
+        if target == "AUTHORIZED":
+            await _transition(
+                session,
+                payment,
+                "AWAITING_CONDITION",
+                evidence={"operation": "authorize", "phase": "awaiting_condition"},
+            )
+            await session.commit()
+            target = "AWAITING_CONDITION"
     return {"state": target, "needs_reconciliation": False, "response": response}

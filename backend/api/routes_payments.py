@@ -28,6 +28,7 @@ from backend.api.schemas import (
     RescueActionOut,
     RescueOut,
 )
+from backend.api.timing_deps import Timed
 from backend.notifications.stream import payment_event_stream
 
 router = APIRouter(prefix="/api/payments", tags=["payments"])
@@ -57,6 +58,7 @@ async def create_payment(
     owner: Owner,
     key: IdempotencyKey,
     api: Api,
+    timer: Timed,
 ) -> PaymentOut:
     """Start a payment. A repeat with the same Idempotency-Key returns the same payment."""
     with translate_errors():
@@ -107,7 +109,7 @@ async def list_events(
 
 
 @router.post("/{payment_id}/return", response_model=PaymentOut, responses=_ERRORS)
-async def buyer_returned(payment_id: PaymentId, owner: Owner, api: Api) -> PaymentOut:
+async def buyer_returned(payment_id: PaymentId, owner: Owner, api: Api, timer: Timed) -> PaymentOut:
     """The buyer came back from PayPal. PayPal is asked what happened; the browser is not
     believed. Safe to call twice."""
     with translate_errors():
@@ -119,7 +121,7 @@ async def buyer_returned(payment_id: PaymentId, owner: Owner, api: Api) -> Payme
 
 @router.post("/{payment_id}/conditions/verify", response_model=PaymentOut, responses=_ERRORS)
 async def verify_condition(
-    payment_id: PaymentId, body: ConditionVerifyIn, caller: AnyCaller, api: Api
+    payment_id: PaymentId, body: ConditionVerifyIn, caller: AnyCaller, api: Api, timer: Timed
 ) -> PaymentOut:
     """Owner or admin says whether the condition was met. Only `true` releases the funds."""
     with translate_errors():

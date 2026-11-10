@@ -40,18 +40,20 @@ from backend.models.repository import (
     transition_payment,
 )
 from backend.notifications.cursor import format_cursor, parse_cursor
-from backend.notifications.hub import EventHub
+from backend.notifications.hub import EventHub, publish_safely
 from backend.orchestration.conditions import ConditionNotReady, PaymentMissing, PaymentService
 from backend.orchestration.lifecycle import (
     LifecycleSafetyError,
     OperationAlreadyStarted,
     create_order,
     execute_operation,
+    mark_awaiting_approval,
     verify_buyer_approval,
 )
 from backend.payments.paypal_client import PayPalError, PayPalNotSent, PayPalOutcomeUnknown
+from backend.reliability import timing
 from backend.reliability.idempotency import register_intent
-from backend.reliability.reconcile import DbReconcileStep
+from backend.reliability.reconcile import DbReconcileStep, StatusReconciler
 from backend.reliability.rescue import DbRescueService, build_rescue_plan, execute_rescue_action
 from backend.state_machine.policy import allowed_actions, display_status_for
 from backend.state_machine.states import (
@@ -209,6 +211,8 @@ class DbPaymentApi:
         paypal_factory: PaypalFactory,
         starter: Any,
         settings: Settings | None = None,
+        quick_reconcile: bool = False,
+        sleep: Callable[[float], Awaitable[Any]] = asyncio.sleep,
     ) -> None:
         self._sessions = session_factory
         self._redis = redis
@@ -216,6 +220,12 @@ class DbPaymentApi:
         self._paypal_factory = paypal_factory
         self._starter = starter
         self._settings = settings or get_settings()
+        # Task 19: when on, a payment that just became UNCERTAIN is checked with PayPal after
+        # about 0.3 s (then 1, 2, 4 and 8 s) without waiting for the next worker round. The
+        # app turns it on; a plain DbPaymentApi (tests, scripts) leaves it off.
+        self._quick_reconcile = quick_reconcile
+        self._sleep = sleep
+        self._reconciling: set[str] = set()
 
     # --- plumbing -----------------------------------------------------------------
     @asynccontextmanager
@@ -228,10 +238,14 @@ class DbPaymentApi:
             yield gateway
 
     async def _notify(self, payment_id: uuid.UUID) -> None:
-        await self._hub.publish(str(payment_id), {"type": "payment.updated"})
+        # Live updates run after the response: a slow Redis can never delay a payment.
+        self._publish_later(str(payment_id), {"type": "payment.updated"})
+
+    def _publish_later(self, intent_id: str, event: dict[str, Any]) -> None:
+        timing.after_response(lambda: publish_safely(self._hub, intent_id, event), "hub-publish")
 
     async def _publish(self, intent_id: str, event: dict[str, Any]) -> None:
-        await self._hub.publish(intent_id, event)
+        self._publish_later(intent_id, event)
 
     @property
     def publisher(self) -> Callable[[str, dict[str, Any]], Awaitable[Any]]:
@@ -323,15 +337,18 @@ class DbPaymentApi:
     async def create_payment(
         self, owner_id: str, key: str, payload: dict[str, Any]
     ) -> tuple[PaymentOut, bool]:
-        async with self._sessions() as session:
-            intent, replay = await register_intent(session, self._redis, owner_id, key, payload)
+        with timing.step("duplicate_check"):
+            async with self._sessions() as session:
+                intent, replay = await register_intent(session, self._redis, owner_id, key, payload)
         payment_id = uuid.UUID(intent["id"])
+        timing.bind_intent(intent["id"])
         if normalize_status(intent["status"]) == INTENT_CREATED:
             # A first request, or a replay whose first attempt stopped before PayPal answered.
             # The durable attempt row makes a second pass safe: it cannot send a second order.
             await self._start_checkout(payment_id)
         await self._notify(payment_id)
-        view = await self._view_by_id(payment_id)
+        with timing.step("build_response"):
+            view = await self._view_by_id(payment_id)
         assert view is not None
         return view, replay
 
@@ -369,14 +386,18 @@ class DbPaymentApi:
                 # The attempt and its state are saved; reconciliation decides, never a replay.
                 await session.rollback()
                 log.warning("create_order did not complete: %s", type(exc).__name__)
+                self._schedule_quick_reconcile(payment_id)
                 return
             if outcome.get("state") != "ORDER_CREATED":
+                self._schedule_quick_reconcile(payment_id)
                 return
             try:
-                await verify_buyer_approval(session, gateway, payment_id=payment_id)
-            except (*PAYPAL_ERRORS, LifecycleSafetyError) as exc:
+                # Database only. The GET that used to run here could not find an approved
+                # order (the order is seconds old) and cost a PayPal round trip per click.
+                await mark_awaiting_approval(session, payment_id=payment_id)
+            except (LifecycleSafetyError, StalePaymentVersion) as exc:
                 await session.rollback()  # the order exists; the buyer can still approve it
-                log.warning("approval check skipped: %s", type(exc).__name__)
+                log.warning("awaiting-approval mark skipped: %s", type(exc).__name__)
 
     # --- reads ----------------------------------------------------------------------
     async def list_payments(
@@ -443,6 +464,7 @@ class DbPaymentApi:
             if payment is None:
                 return None
             status, mode = normalize_status(payment.status), payment.mode
+        timing.bind_intent(str(payment_id))
         async with self._gateway() as gateway:
             if status == UNCERTAIN:
                 # One forced read of PayPal (Task 8) settles what happened before we go on.
@@ -459,9 +481,59 @@ class DbPaymentApi:
                         await session.rollback()
                         status = await self._status_of(payment_id)
             if status == APPROVED:
+                await self._record_buyer_approval_time(payment_id)
                 await self._after_approval(gateway, payment_id, mode)
         await self._notify(payment_id)
-        return await self._view_by_id(payment_id)
+        with timing.step("build_response"):
+            return await self._view_by_id(payment_id)
+
+    async def _record_buyer_approval_time(self, payment_id: uuid.UUID) -> None:
+        """The buyer's own time: from the order being created to the buyer coming back approved.
+        It is human time, shown apart from SlothPay's and PayPal's, and never counted as ours."""
+        if timing.current() is None:
+            return
+        try:
+            async with self._sessions() as session:
+                created_at = await session.scalar(
+                    select(func.min(PaymentAudit.created_at)).where(
+                        PaymentAudit.payment_id == payment_id,
+                        PaymentAudit.to_state == ORDER_CREATED,
+                    )
+                )
+            if created_at is not None:
+                waited = (datetime.now(UTC) - created_at).total_seconds() * 1000
+                timing.add_step(timing.BUYER_APPROVAL, timing.HUMAN, waited)
+        except Exception:
+            log.warning("could not measure the buyer approval time", exc_info=True)
+
+    def _schedule_quick_reconcile(self, payment_id: uuid.UUID) -> None:
+        if self._quick_reconcile:
+            timing.after_response(lambda: self._quick_reconcile_run(payment_id), "quick-reconcile")
+
+    async def _quick_reconcile_run(self, payment_id: uuid.UUID) -> None:
+        """Ask PayPal what happened to a payment that just became UNCERTAIN: first read after
+        0.3 s, then 1, 2, 4, 8 s (the schedule from Task 8). It uses the same guarded step the
+        worker uses, so a worker running at the same time cannot cause a second action."""
+        key = str(payment_id)
+        if key in self._reconciling:
+            return
+        self._reconciling.add(key)
+        timer = timing.StepTimer(intent_id=key)
+        token = timing.activate(timer)
+        try:
+            async with self._gateway() as gateway:
+                reconciler = StatusReconciler.for_database(
+                    self._sessions, gateway, sleep=self._sleep
+                )
+                await reconciler.reconcile_detailed(key)
+        except Exception as exc:
+            log.warning("quick reconcile stopped: %s", type(exc).__name__)
+        finally:
+            self._reconciling.discard(key)
+            timer.stop()
+            timing.deactivate(token)
+            await timing.persist(self._sessions, timer)
+        await publish_safely(self._hub, key, {"type": "payment.updated"})
 
     async def _status_of(self, payment_id: uuid.UUID) -> str | None:
         async with self._sessions() as session:
@@ -481,7 +553,10 @@ class DbPaymentApi:
             except PAYPAL_ERRORS as exc:
                 await session.rollback()
                 log.warning("%s did not complete: %s", operation, type(exc).__name__)
+                self._schedule_quick_reconcile(payment_id)
                 return  # saved as UNCERTAIN or claimed: reconciliation decides, no replay
+        if outcome.get("needs_reconciliation"):
+            self._schedule_quick_reconcile(payment_id)
         if operation == "authorize" and outcome.get("state") == AWAITING_CONDITION:
             await self._start_condition_workflow(payment_id)
 
@@ -516,6 +591,9 @@ class DbPaymentApi:
     async def verify_condition(
         self, caller: Caller, payment_id: uuid.UUID, verified: bool, evidence: dict[str, Any]
     ) -> PaymentOut | None:
+        # Starts the `condition_to_capture` clock: owner says "met" -> capture request sent.
+        timing.mark("condition_verified")
+        timing.bind_intent(str(payment_id))
         async with self._sessions() as session:
             payment = await session.get(Payment, payment_id, populate_existing=True)
             if payment is None or (not caller.is_admin and payment.merchant_id != caller.owner_id):
@@ -533,7 +611,8 @@ class DbPaymentApi:
             await session.commit()
         await self._resolve(payment_id, verified is True, evidence)
         await self._notify(payment_id)
-        return await self._view_by_id(payment_id)
+        with timing.step("build_response"):
+            return await self._view_by_id(payment_id)
 
     async def _resolve(
         self,

@@ -57,6 +57,19 @@ _WEBHOOK_VERIFY = text(
 )
 
 
+# Task 19: SlothPay's own added time per payment, and verified-condition -> capture request.
+_SPEED = text(
+    """
+    SELECT
+      (SELECT percentile_cont(0.95) WITHIN GROUP (ORDER BY ours) FROM (
+         SELECT sum(ms) AS ours FROM payment_timings WHERE kind = 'ours' GROUP BY intent_id
+       ) o) AS overhead_p95,
+      (SELECT percentile_cont(0.95) WITHIN GROUP (ORDER BY ms)
+         FROM payment_timings WHERE step = 'condition_to_capture') AS cond_p95
+    """
+)
+
+
 def _round(value: Any, places: int) -> float | None:
     return None if value is None else round(float(value), places)
 
@@ -65,6 +78,7 @@ async def compute_metrics(session: AsyncSession) -> MetricsOut:
     counts = (await session.execute(_COUNTS)).mappings().one()
     latency = (await session.execute(_CAPTURE_LATENCY)).mappings().one()
     webhook = (await session.execute(_WEBHOOK_VERIFY)).mappings().one()
+    speed = (await session.execute(_SPEED)).mappings().one()
     return MetricsOut(
         total=int(counts["total"]),
         completed=int(counts["completed"]),
@@ -76,6 +90,8 @@ async def compute_metrics(session: AsyncSession) -> MetricsOut:
         capture_seconds_p95=_round(latency["p95_s"], 2),
         webhook_verify_ms_avg=_round(webhook["avg_ms"], 1),
         webhook_verify_ms_p95=_round(webhook["p95_ms"], 1),
+        safety_overhead_ms_p95=_round(speed["overhead_p95"], 1),
+        condition_to_capture_ms_p95=_round(speed["cond_p95"], 1),
         generated_at=datetime.now(UTC),
     )
 

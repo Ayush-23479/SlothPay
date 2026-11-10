@@ -178,3 +178,32 @@ async def close_hub() -> None:
     redis, _redis, _hub = _redis, None, None
     if redis is not None:
         await redis.aclose()
+
+
+# ---------------------------------------------------------------------------- Task 19
+PUBLISH_TIMEOUT_SECONDS = 1.0
+
+
+async def publish_safely(
+    hub: EventHub,
+    intent_id: str,
+    event: dict[str, Any],
+    *,
+    timeout: float = PUBLISH_TIMEOUT_SECONDS,
+) -> bool:
+    """Publish without ever raising or waiting longer than `timeout`. A slow or broken Redis
+    is logged and the payment is untouched: the event is only a wake-up for open dashboards."""
+    try:
+        return bool(await asyncio.wait_for(hub.publish(intent_id, event), timeout))
+    except TimeoutError:
+        log.warning("live update timed out after %.1fs; skipped", timeout)
+    except Exception as exc:
+        log.warning("live update failed (%s); skipped", type(exc).__name__)
+    return False
+
+
+def publish_nowait(hub: EventHub, intent_id: str, event: dict[str, Any]) -> None:
+    """Fire and forget: schedule the publish and return at once (call from async code)."""
+    from backend.reliability import timing
+
+    timing.spawn(publish_safely(hub, intent_id, event), "hub-publish")
