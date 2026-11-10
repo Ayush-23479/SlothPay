@@ -1,4 +1,4 @@
-﻿"""Fail-closed Redis replay guard for signed condition events."""
+"""Fail-closed Redis replay guard for signed condition events."""
 
 from __future__ import annotations
 

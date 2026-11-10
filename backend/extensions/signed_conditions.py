@@ -1,4 +1,4 @@
-﻿"""Validate signed external condition-verification events.
+"""Validate signed external condition-verification events.
 
 Validation alone never triggers a capture or void.
 """

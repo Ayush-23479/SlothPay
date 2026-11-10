@@ -116,7 +116,7 @@ def create_app() -> FastAPI:
     app.include_router(metrics_router)  # Task 12
     app.include_router(intelligence_router)  # Task 13: invoice pre-fill
     app.include_router(passport_router)
-    app.include_router(extensions_router)  # Task 14: Trust Passport
+    app.include_router(extensions_router)  # Task 18: Signed condition webhooks
     app.include_router(chaos_router)  # Task 12: answers 404 unless chaos is allowed
 
     @app.get("/health")

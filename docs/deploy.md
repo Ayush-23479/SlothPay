@@ -208,3 +208,21 @@ Also keep the sandbox credentials the same. If you rotate the PayPal secret, upd
 | Webhooks never apply | Wrong `PAYPAL_WEBHOOK_ID`, or the webhook URL points at the dashboard. | Use the API address and the ID shown for that webhook. |
 | "Payments are temporarily unavailable" | The database or Key Value store is not reachable. | Check both resources in Render. |
 | Everything is down for the rest of the month | The 750 free hours were used. | Wait for the month to reset, or upgrade the API. Do not run a pinger. |
+
+## Task 18: Signed condition webhooks
+
+Set `CONDITION_WEBHOOK_SECRET` to a random secret of at least 32 characters.
+Generate it with `python -c 'import secrets; print(secrets.token_hex(32))'`.
+Store the value privately in your local environment or deployment secrets.
+The Render Blueprint generates the secret for new deployments.
+
+Endpoint: `POST /api/extensions/zapier/verify`.
+When the secret is missing or shorter than 32 characters, the endpoint returns HTTP 503.
+The caller must authenticate with the custom HMAC-SHA256 signature.
+The signature covers the timestamp, event ID, and exact request-body bytes.
+This is not a native Zapier signature.
+Only a trusted signer that independently verifies the condition may authorize a payment.
+The synthetic-only local relay must not be publicly exposed.
+
+Replay reservations last seven days. A processing failure may retain a reservation.
+An operator must investigate uncertain outcomes before permitting retries.
