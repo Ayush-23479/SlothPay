@@ -480,56 +480,43 @@ SlothPay/
 
 ---
 
-## Team
 
 ### 👩‍💻 Agrima Saxena
-**Software Engineer · Backend Systems · Applied AI · Payment Security · Co-builder of SlothPay | PayPal AI Hackathon 2026**
 
-- Co-engineered SlothPay's payment safety and trust infrastructure, contributing across backend development, conditional-payment security, database reliability, testing, code reviews, documentation and deployment preparation.
+**Software Engineer · Backend Systems · Applied AI · Payment Security · Co-builder of SlothPay**
 
-- Contributed to SlothPay's PostgreSQL persistence, PayPal Sandbox integration, payment-state reliability, idempotency and concurrency safeguards through the team's task-based development and GitHub review workflow. Built Task 18's signed conditional-verification layer, including Redis replay protection, ownership validation and secure webhook handling.
+- Co-built SlothPay's payment infrastructure, contributing to PostgreSQL persistence, PayPal Sandbox integration, idempotency, concurrency safeguards and failure-resilient payment workflows across the team's 19-task development plan. Contributed to PostgreSQL payment persistence, PayPal Sandbox integration, idempotency controls and concurrency-safe payment processing, helping prevent duplicate transactions and preserve payment state across retries and failures.
 
--Engineered the `POST /api/extensions/zapier/verify` FastAPI endpoint to securely accept condition-verification events, integrating **HMAC-SHA256 signatures, constant-time verification, five-minute timestamp validation and payment-owner checks** into the existing ConditionalPay capture/void workflow.
+- Engineered Task 18's signed ConditionalPay verification, integrating HMAC-SHA256, constant-time signature checks, five-minute timestamp validation and ownership enforcement into the FastAPI capture/void workflow.
 
--Developed the signed-webhook protocol and local testing utilities for Zapier-style event delivery, including a webhook sender and synthetic-only signing relay. Designed the integration boundary so external events must be authenticated and verified before authorizing conditional payment settlement. **Real Zapier-to-PayPal end-to-end integration requires separate validation.**
+- Developed Zapier-ready webhook infrastructure with local signing tools and atomic Redis-backed replay protection, blocking duplicate verification events for seven days; real external Zapier verification remains a separate integration step.
 
--Implemented atomic Redis-backed event reservations with **seven-day replay protection**, preventing duplicate signed verification events from repeatedly triggering payment operations.
+- Strengthened backend security and test isolation, rejecting non-canonical session signatures and using isolated PostgreSQL test databases to protect shared data during integration testing.
 
-- Strengthened session-signature validation to reject non-canonical signatures and improved PostgreSQL test isolation by using temporary test databases, reducing the risk of safety tests modifying shared application data.
+- Validated payment reliability through 5 passing PostgreSQL-backed webhook lifecycle tests and 34 targeted security/recovery tests; addressed GitHub review feedback and verified Task 19 merge compatibility.
 
-- Developed and validated **five PostgreSQL-backed Task 18 integration tests** covering successful capture, void, webhook replay rejection, payload tampering and incorrect ownership. Also verified **34 passing targeted security and recovery regression tests**, alongside clean Ruff checks.
-
-- Contributed through feature branches, pull requests and peer review, addressed Task 18 review findings involving webhook-secret documentation, UTF-8 BOM removal and route labeling. Reviewed Task 19's payment-timing and comparison implementation and checked its merge compatibility with the updated main branch.
-
-- Collaborated with Ayush on deployment planning, environment configuration, Render preparation, secure secret handling, technical documentation and hackathon submission readiness.
-
-Building payment systems that remain consistent when responses are lost, requests are retried, webhooks arrive repeatedly or external verification cannot be trusted.
+- Collaborated with Ayush on deployment and delivery, including Render/Vercel configuration, PayPal Sandbox setup, security documentation, code reviews and hackathon submission preparation.
 
 <table>
 <tr>
 <td width="60">
 <a href="https://www.linkedin.com/in/agrima-saxena-142960426/" title="LinkedIn">
 <img src="https://img.icons8.com/color/48/linkedin.png"
-     width="32"
-     height="32"
-     alt="LinkedIn">
+     width="32" height="32" alt="LinkedIn">
 </a>
 </td>
 
 <td width="60">
 <a href="mailto:agrimalc@gmail.com" title="Email">
 <img src="https://img.icons8.com/color/48/gmail-new.png"
-     width="32"
-     height="32"
-     alt="Email">
+     width="32" height="32" alt="Email">
 </a>
 </td>
 
 <td width="60">
 <a href="https://github.com/agcodes0315" title="GitHub">
-<img src="https://img.shields.io/badge/GitHub-181717?style=for-the-badge&logo=github&logoColor=white"
-     height="30"
-     alt="GitHub">
+<img src="https://img.icons8.com/ios-glyphs/48/ffffff/github.png"
+     width="32" height="32" alt="GitHub">
 </a>
 </td>
 </tr>
