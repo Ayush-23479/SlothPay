@@ -171,6 +171,36 @@ same value as `ADMIN_API_KEY`. Be aware that:
 
 The safer default is chaos off on the hosted site and chaos shown in the video and locally.
 
+## How the API starts on Render
+
+The API's start command is `sh /app/scripts/start_render.sh`, set as `dockerCommand` in
+`render.yaml`. The script runs the migrations and then starts the server. It is a file because
+Render could not run a one-line command with quotes in it (the deploy failed with
+`not found`, exit status 127). If you ever see that error, check that the service's **Start
+Command** in the Render dashboard (Settings) matches `render.yaml`, because a value set in the
+dashboard overrides the file.
+
+## Optional: put the dashboard on Vercel
+
+Not needed: the dashboard already runs on Render. If you prefer Vercel for the frontend only:
+
+1. Import the repository on Vercel and set **Root Directory** to `frontend`.
+2. Set `BACKEND_URL` to the API address (no trailing slash, no path), `NEXT_PUBLIC_USE_MOCKS` to
+   `false`, and leave `NEXT_PUBLIC_API_BASE_URL` empty. `BACKEND_URL` is read at build time.
+3. Deploy, then set `FRONTEND_ORIGIN` on `slothpay-api` to the new Vercel address and redeploy
+   the API. PayPal sends the buyer back to that address.
+4. Give judges only one dashboard link. The PayPal webhook still goes to the API address.
+
+The API stays on Render, so it still sleeps when idle. The live status stream goes through
+Vercel's proxy, which has not been tested for streaming. Refresh the page if it stops updating.
+
+## Optional: the signed condition webhook
+
+`POST /api/extensions/zapier/verify` answers 503 until `CONDITION_WEBHOOK_SECRET` is set on
+`slothpay-api` (at least 32 characters). Generate one with `python -c "import secrets;
+print(secrets.token_urlsafe(48))"`. Leave it unset if you do not use the extension. See
+`docs/architecture.md`.
+
 ## Keep the demo alive until judging ends
 
 The free database expires 30 days after it is created. Write down the creation date now:
@@ -179,10 +209,10 @@ The free database expires 30 days after it is created. Write down the creation d
 | --- | --- |
 | Database created | (fill in) |
 | Database expires (created + 30 days) | (fill in) |
+| Last day of judging | 15 December |
 
 Example: a database created on 10 November expires on 10 December, five days before judging
 ends, so it needs upgrading or recreating by about 3 December.
-| Last day of judging | 15 December |
 
 If the database would expire before judging ends, do one of these **before** the expiry date:
 
