@@ -37,17 +37,19 @@ SlothPay prevents that with three ideas:
 | Routes | `backend/api` | Check the caller (signed session cookie), limit abuse, and hand work to the layers below. |
 | State machine | `backend/state_machine` | Pure rules, no database and no network. Decides which status moves are legal and which actions are safe. See `docs/state-machine-contract.md`. |
 | Orchestration | `backend/orchestration` | Runs a money move in the safe order: claim it in the database, then call PayPal. |
-| Reliability | `backend/reliability` | Stable request ids, the duplicate lock, reconciliation, rescue plans, and sandbox-only chaos switches. |
-| PayPal client | `backend/payments` | The only code that talks to PayPal. It accepts only the sandbox address. |
+| Reliability | `backend/reliability` | Stable request ids, the duplicate lock, reconciliation, rescue plans, step timing (`timing.py`) and sandbox-only chaos switches. |
+| PayPal client | `backend/payments` | The only code that talks to PayPal. It accepts only the sandbox address. One shared client keeps its connection open and renews its token in the background. |
 | Webhooks | `backend/webhooks` | Verify PayPal's signature, store each event once, and apply it later. |
 | Intelligence | `backend/intelligence` | Optional AI explanations. It reads masked facts and cannot move money. |
 | Live updates | `backend/notifications` | Push status changes to the browser (Server-Sent Events over Redis). |
 | Workflows | `backend/workflows` | Optional Temporal workflows (the ConditionalPay deadline timer). |
+| Extensions | `backend/extensions` | Optional signed condition-verification webhook with replay protection (Task 18). |
 
 ## Data
 
-PostgreSQL holds six tables: `payments`, `payment_attempts`, `payment_reconciliations`,
-`payment_conditions`, `provider_events` (the webhook inbox) and `payment_audit`. The audit table
+PostgreSQL holds seven tables: `payments`, `payment_attempts`, `payment_reconciliations`,
+`payment_conditions`, `provider_events` (the webhook inbox), `payment_audit` and
+`payment_timings` (how long each step took, sandbox timings). The audit table
 is append-only: the database refuses `UPDATE`, `DELETE` and `TRUNCATE` on it. Redis holds the
 temporary things: the duplicate lock, the rate-limit counters and the live-update channel.
 
@@ -105,6 +107,36 @@ payment or an error in plain words, and read an invoice into a draft. The rules:
 - A time limit applies. On a timeout, an error or a bad answer, fixed text is used instead.
 - It can only name actions the state machine already allows. It never decides a money move.
 
+## Speed: swift and safe
+
+Safety must not make payments slow, and the speed is measured, not claimed. Full detail is in
+`docs/speed.md`.
+
+- **A short hot path.** Between the buyer's click and PayPal's answer there is one Redis lock,
+  one database transaction and the PayPal call. Live updates, Sentry reports and the first
+  recovery check run after the response.
+- **A warm connection.** One shared PayPal client stays connected and its token is renewed before
+  it expires, so no request pays for a new connection or a new login.
+- **Fast failure detection.** After a lost answer the first check runs about 0.3 seconds later,
+  then at 1, 2, 4 and 8 seconds.
+- **Time is split three ways.** Each payment records SlothPay's own time, PayPal's time and the
+  buyer's time separately, so the cost of safety can be shown. The dashboard's Speed panel and
+  `GET /api/speed` show it. Deliberate waiting is never counted as SlothPay's time.
+- **A comparison page.** `/compare` runs a plain checkout (no request id, a long timeout, a blind
+  retry) next to SlothPay for the order step. It needs chaos mode, so it is local only.
+
+All figures are sandbox or simulator figures. No speed shortcut is allowed to skip saving before
+sending, the duplicate checks or the state machine.
+
+## Signed condition verification (optional)
+
+`POST /api/extensions/zapier/verify` lets a trusted outside service say a ConditionalPay
+condition is met. The call carries an HMAC-SHA256 signature over a timestamp, an event id and the
+exact body. SlothPay checks the signature, a five-minute window and the owner inside the signed
+body, reserves the event in Redis so it cannot be replayed, and then uses the same capture-or-void
+path as the dashboard button. It makes no PayPal call of its own. It is a custom SlothPay
+signature, not a native Zapier one, and it answers 503 until `CONDITION_WEBHOOK_SECRET` is set.
+
 ## Security
 
 Covered in `docs/TASK16_SECURITY.md`: signed expiring session cookies, per-address rate limits, a
@@ -126,6 +158,8 @@ buyer or merchant can check a payment without logging in. A link shows only that
 | Does SmartPay complete? | `tests/integration/test_smartpay_flow.py` |
 | Does ConditionalPay hold, capture and void correctly? | `tests/integration/test_conditionalpay_flow.py`, `test_conditional_expiry.py` |
 | Are forged webhooks refused? | `tests/integration/test_webhook_security.py` |
+| Is the signed condition webhook safe? | `tests/unit/test_routes_extensions.py`, `tests/integration/test_task18_webhook_flow.py` |
+| Are timings split and saved? | `tests/unit/test_timing.py`, `tests/integration/test_speed_db.py` |
 | Can the audit trail be edited? | `tests/integration/test_audit_trail_db.py` |
 
 ## Known limits
@@ -136,5 +170,8 @@ buyer or merchant can check a payment without logging in. A link shows only that
 - If the answer to *create order* is lost, there is no PayPal order to look up, so that payment can
   stay `UNCERTAIN` (about 1 in 10 under the stress script).
 - Timings in the safety numbers are sandbox timings. Real PayPal will differ.
+- The Compare page only compares the order step, because capturing needs a real buyer.
+- A failed signed-condition call keeps its seven-day reservation, so a sender's retry is blocked.
+  This is safe (the deadline still voids the hold) but needs an operator reset.
 - The hosted demo has no Temporal worker, so a ConditionalPay deadline does not expire by itself
   there. See `docs/deploy.md`.
