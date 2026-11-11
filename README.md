@@ -1,6 +1,6 @@
 <h1>🦥 SlothPay</h1>
 
-<p></p>
+<p>
   <b>The payment-safety layer that helps a payment survive a lost answer.</b>
 </p>
 
@@ -44,7 +44,7 @@ SlothPay preserves payment state across timeouts, retries, delayed approvals and
 | **Problem** | Payment confirmations can be lost even when the provider processed the request. Users retry, and asynchronous events arrive late or out of order. |
 | **Task** | Build a PayPal-sandbox payment layer that avoids duplicate money movement, makes uncertain states recoverable and keeps a clear decision trail. |
 | **Actions** | Idempotency, database state transitions, Redis locks and replay guards, reconciliation, webhook verification, state-aware recovery, a Next.js dashboard and optional read-only AI explanations. |
-| **Results** | Task 18 local checks: 5/5 PostgreSQL-backed signed-webhook integration tests, 34 passing targeted security/recovery tests and clean Ruff validation. This is test evidence, not production payment-volume evidence. |
+| **Results** | A full automated suite with PostgreSQL-backed integration tests (duplicate clicks, lost answers, forged webhooks, signed condition events), clean Ruff and secret scans, and measured timings: SlothPay's own added time is reported separately from PayPal's and the buyer's (sandbox and simulator numbers, see [`docs/speed.md`](./docs/speed.md)). This is test evidence, not production payment-volume evidence. |
 
 ---
 
@@ -53,13 +53,20 @@ SlothPay preserves payment state across timeouts, retries, delayed approvals and
 | Resource | Link |
 |---|---|
 | Source code | [github.com/agcodes0315/SlothPay](https://github.com/agcodes0315/SlothPay) |
-| Hosted frontend | https://sloth-pay.vercel.app/ |
-| API health check | https://slothpay-api.onrender.com + `/health`_ |
+| Hosted demo (dashboard) | [sloth-pay.vercel.app](https://sloth-pay.vercel.app/) |
+| API health check | [slothpay-api.onrender.com/health](https://slothpay-api.onrender.com/health) |
 | Video walkthrough | _Add the published demo video URL_ |
 | Hackathon | [PayPal AI Hackathon 2026](https://paypalaihackathon.devpost.com/) |
 | Deployment guide | [`docs/deploy.md`](./docs/deploy.md) |
 
-> **Deployment note:** The example Render URLs in the repository are configuration examples, not proof of an active deployment. A free-tier backend may need time to wake up. Never publish sandbox credentials or expose local test-signing helpers.
+> **Hosted demo note:** the API runs on Render's free plan, which sleeps after about 15 minutes without traffic, so the **first load can take about a minute**. It uses the PayPal **sandbox** only, so no real money moves. The hosted demo has no Temporal worker and chaos mode is off; the video shows both running locally. Never publish sandbox credentials or expose local test-signing helpers.
+
+### Try the hosted demo
+
+1. Open the dashboard and log in with a demo identity (`alice`, `bob` or `carol`; no password).
+2. Create a small **SmartPay** payment, approve it on PayPal's page with a **sandbox buyer** account (developer.paypal.com, Testing tools, Sandbox accounts), and watch it complete.
+3. Open the payment for its timeline and Trust Passport. Try **ConditionalPay** and press **Verify: condition met**.
+4. Open the **Speed** panel to see SlothPay's own time next to PayPal's and the buyer's.
 
 ---
 
@@ -99,7 +106,7 @@ flowchart TD
 | 📡 **Live updates** | Payment state and safety indicators on the dashboard. |
 | 🧪 **Failure simulation** | Sandbox-only scenarios such as dropped responses, delays and concurrent clicks. |
 | 🤖 **Optional AI assistance** | Explains masked payment details and helps draft invoice data. It never decides payments. |
-| ⏱️ **Speed and comparison (Task 19)** | Payment timing instrumentation, benchmarks and a `/compare` dashboard. Availability depends on whether that PR is merged and deployed. |
+| ⏱️ **Speed and comparison (Task 19)** | Every payment's time is split into SlothPay's own time, PayPal's time and the buyer's time (Speed panel, `GET /api/speed`). A `/compare` page and `scripts/latency_bench.py` show the cost of safety. Sandbox and simulator numbers only. See [`docs/speed.md`](./docs/speed.md). |
 
 ---
 
@@ -165,6 +172,8 @@ flowchart TD
     API --> RC[Reconciliation and recovery]
     RC --> PP
     API --> AI[Optional read-only AI explanations]
+    API --> TM[Step timing: ours / PayPal / buyer]
+    TM --> DB
     V[Trusted condition verifier - integration pending] --> SG[HMAC-signed condition event]
     SG --> API
 ```
@@ -241,6 +250,33 @@ The PostgreSQL integration fixtures create and remove isolated local databases. 
 
 ---
 
+## Environment Variables
+
+Set these in `.env` (local) or as secrets in your host. All PayPal values are **sandbox** values. Never commit real values.
+
+| Variable | Purpose | Default or note |
+|---|---|---|
+| `ENV` | `local`, `sandbox`, `demo` or `production`. `demo` and `production` refuse unsafe settings at startup. | `local` |
+| `DATABASE_URL` | PostgreSQL connection string | local Docker database |
+| `REDIS_URL` | Redis connection string (locks, rate limits, live updates) | local Docker Redis |
+| `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET` | Sandbox app credentials | required |
+| `PAYPAL_BASE_URL` | Must be an `https://...sandbox.paypal.com` host in demo and production | sandbox |
+| `PAYPAL_WEBHOOK_ID` | From the PayPal webhook you register. Without it every webhook is rejected (safe). | required for webhooks |
+| `FRONTEND_ORIGIN` | Dashboard address. PayPal sends the buyer back here, and CORS allows only it. | `http://localhost:3000` |
+| `ADMIN_API_KEY`, `PASSPORT_SIGNING_SECRET` | 32+ random characters each | required in demo and production |
+| `CONDITION_WEBHOOK_SECRET` | Signing secret for the optional signed condition webhook (32+ characters). The route answers 503 until set. | optional |
+| `CHAOS_ENABLED` | Controlled-failure switches. Refused in demo and production. | `false` |
+| `RUN_BACKGROUND_WORKERS` | Run the recovery and webhook loops inside the API (for hosts with no worker plan) | `false` |
+| `RECONCILIATION_DELAYS_SECONDS` | Pauses before each status check after a lost answer | `0.3,1,2,4,8` |
+| `BASELINE_TIMEOUT_SECONDS` | How long the Compare page's plain checkout waits for a lost answer (max 30) | `30` |
+| `DEMO_USERS` | Named demo logins | `alice,bob,carol` |
+| `TEMPORAL_ADDRESS`, `TEMPORAL_NAMESPACE` | Optional Temporal server (local only in the demo) | `localhost:7233` |
+| `SENTRY_DSN`, `GEMMA_BASE_URL`, `GEMMA_API_KEY`, `GEMMA_MODEL` | Optional monitoring and AI. Leave empty to run without them. | empty |
+
+The dashboard has its own `frontend/.env.example` (`NEXT_PUBLIC_API_BASE_URL`, `NEXT_PUBLIC_USE_MOCKS`). `NEXT_PUBLIC_*` values are visible in the browser.
+
+---
+
 ## Try a PayPal Sandbox Payment
 
 1. Open the [PayPal Developer Dashboard](https://developer.paypal.com/) and find your **Sandbox** accounts.
@@ -272,6 +308,13 @@ python -m pytest -q -rs tests/integration
 ```bash
 # Focused Task 18 tests
 python -m pytest -q tests/unit/test_replay_guard.py tests/unit/test_signed_conditions.py tests/integration/test_task18_webhook_flow.py
+
+# Focused Task 19 tests (timing, shared PayPal client, speed route, migration)
+python -m pytest -q tests/unit/test_timing.py tests/unit/test_shared_paypal.py
+SLOTHPAY_RUN_DB_TESTS=1 python -m pytest -q tests/integration/test_speed_db.py
+
+# Latency benchmark against the fake PayPal (simulator numbers; needs the local PostgreSQL)
+python scripts/latency_bench.py
 
 # Lint and secret scan
 python -m ruff check backend tests scripts database
@@ -310,8 +353,8 @@ npm run build
 | Targeted payment security and recovery regression | **34 passed** (reported local run) |
 | Task 18 Ruff validation | **Passed** (reported local run) |
 | Broader suite | 1,179 passed, 24 skipped (Temporal), 1 xfailed (reviewer-reported, not independently re-run for this README) |
-| Task 19 selected backend tests | 171 passed across selected suites (previously reported) |
-| Task 19 frontend production build | Successful on its isolated branch (previously reported) |
+| Task 19 timing, shared-client, speed-route and migration tests | Included in the full suite (`tests/unit/test_timing.py`, `test_shared_paypal.py`, `tests/integration/test_speed_db.py`) |
+| Task 19 latency benchmark | `python scripts/latency_bench.py` prints SlothPay's own time against the fake PayPal (simulator numbers, not real PayPal) |
 | Real external Zapier → verifier → PayPal sandbox | **Not yet end-to-end verified** |
 
 > These are engineering test results from local and reviewed runs. They are not a claim of production payment volume or live uptime.
@@ -341,6 +384,7 @@ Claude was also used as a development assistant for drafting and reviewing code,
 | Reconciliation and state-aware recovery logic | Stress tests use a fake PayPal simulator |
 | Signed Trust Passport and dashboard | Optional AI explanations may use a deterministic fallback |
 | Test and local deployment configuration | Public production readiness and live uptime are not claimed |
+| Step timing stored per payment (ours, PayPal, buyer) | Timings are sandbox or simulator figures. The benchmark's PayPal is a fake that answers in about a millisecond, so it measures SlothPay's own time only. |
 
 ---
 
@@ -359,7 +403,7 @@ See [`docs/TASK16_SECURITY.md`](./docs/TASK16_SECURITY.md) for security controls
 - Free hosting and optional Temporal/background workers have operational limits; see [`docs/deploy.md`](./docs/deploy.md).
 - The documented capture-decline handling includes an expected-failure test and should not be described as fully resolved.
 
-**SlothPay does not claim:** real money movement, a native Zapier webhook signature, a verified real Zapier → verifier → PayPal sandbox flow, a verified public deployment or live uptime, production-scale payment volume, or completed manual PayPal sandbox and webhook end-to-end validation.
+**SlothPay does not claim:** real money movement, a native Zapier webhook signature, a verified real Zapier → verifier → PayPal sandbox flow, guaranteed uptime of the free-tier demo (it sleeps when idle), production-scale payment volume, or completed manual PayPal sandbox and webhook end-to-end validation.
 
 ---
 
@@ -367,9 +411,9 @@ See [`docs/TASK16_SECURITY.md`](./docs/TASK16_SECURITY.md) for security controls
 
 The repository includes [`render.yaml`](./render.yaml) and a full guide in [`docs/deploy.md`](./docs/deploy.md).
 
-Typical setup: a Docker-based backend on Render, a Next.js frontend on Render or Vercel, and managed PostgreSQL and Redis. Check current free-tier availability and persistence before deploying a judge-facing demo. Configure the real frontend origin, public backend URL, HTTPS webhooks and PayPal sandbox variables through provider secrets.
+Current hosted setup: the API, PostgreSQL and a Redis-compatible store on Render (free plan), and the dashboard on Vercel (a Render dashboard service is also defined in `render.yaml`). The API start command is `scripts/start_render.sh`, which runs the migrations and then starts the server. Free-plan limits (the API sleeps when idle, and the free database expires 30 days after creation) are written up in [`docs/deploy.md`](./docs/deploy.md).
 
-> Do not publish a URL in this README until the service actually responds. Keep the seven-day replay store persistent if you make security guarantees across server restarts.
+> Configure the real frontend origin, public backend URL, HTTPS webhook and PayPal sandbox variables through provider secrets. The replay store for signed condition events lives in Redis, and a free Redis empties on restart, so do not rely on the seven-day replay guarantee across restarts there.
 
 ---
 
@@ -379,8 +423,8 @@ Typical setup: a Docker-based backend on Render, a Next.js frontend on Render or
 - [x] Lost-answer handling and reconciliation logic
 - [x] Signed verification with replay protection (Task 18)
 - [x] Task 18 feature PR and reviewer cleanup merged
-- [ ] Confirm Task 19 PR merge and release the timing/comparison dashboard
-- [ ] Verify live frontend + backend + database + Redis deployment
+- [x] Task 19 merged: step timing, Speed panel, Compare page and latency benchmark
+- [x] Deployed: API, database and Redis on Render, dashboard on Vercel
 - [ ] Complete manual PayPal sandbox transaction and webhook end-to-end validation
 - [ ] Connect a real, independently verified Zapier-origin condition through a trusted signer
 - [ ] Add route-specific rate limiting and an audited replay-reservation recovery policy
@@ -404,7 +448,9 @@ SlothPay/
 ├── database/                PostgreSQL schema and helpers
 ├── frontend/                Next.js dashboard
 ├── scripts/
-│   └── scan_secrets.py      Secret scanner
+│   ├── scan_secrets.py      Secret scanner
+│   ├── latency_bench.py     Latency benchmark against the fake PayPal (simulator numbers)
+│   └── start_render.sh      API start command on Render (migrations, then the server)
 ├── tests/
 │   ├── unit/                Unit and regression tests
 │   └── integration/         PostgreSQL-backed integration tests
@@ -418,8 +464,6 @@ SlothPay/
 └── README.md
 ```
 
-> Adjust the folder comments if your actual layout differs.
-
 ## Documentation
 
 | Document | Purpose |
@@ -428,6 +472,9 @@ SlothPay/
 | [`docs/state-machine-contract.md`](./docs/state-machine-contract.md) | Valid payment state transitions |
 | [`docs/deploy.md`](./docs/deploy.md) | Hosting, secrets and PayPal sandbox configuration |
 | [`docs/demo-script.md`](./docs/demo-script.md) | Three-minute hackathon demonstration |
+| [`docs/speed.md`](./docs/speed.md) | How speed is measured and what was changed for it (sandbox numbers) |
+| [`docs/submission.md`](./docs/submission.md) | Submission text, test instructions and checklist |
+| [`docs/ai-development.md`](./docs/ai-development.md) | How AI was used to build the project, task by task |
 | [`docs/TASK16_SECURITY.md`](./docs/TASK16_SECURITY.md) | Security controls and deployment caveats |
 | [`tests/integration/test_task18_webhook_flow.py`](./tests/integration/test_task18_webhook_flow.py) | Signed webhook capture/void/replay tests |
 
