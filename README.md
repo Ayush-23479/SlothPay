@@ -482,19 +482,31 @@ SlothPay/
 
 ## Team
 
-### Agrima Saxena
-**Software Engineer · Applied AI and Agentic Systems · Co-builder of SlothPay: about half of the build tasks, planning and deployment, tests and reviews**
+### 👩‍💻 Agrima Saxena
+**Software Engineer · Backend Systems · Applied AI · Payment Security · Co-builder of SlothPay | PayPal AI Hackathon 2026**
 
-- Built about half of SlothPay's 19 build tasks, each delivered as its own pull request, and kept the branch-and-review workflow running.
-- Built Task 18, the signed ConditionalPay verification: HMAC-signed events, a five-minute window, Redis replay protection, a FastAPI endpoint and a local signing sender for testing.
-- Fixed session-signature checking so non-canonical signatures are rejected, and isolated the PostgreSQL test databases so safety tests do not touch shared data.
-- Wrote tests for her tasks, such as the signed-webhook lifecycle, and addressed review feedback after merge.
-- Worked with Ayush on planning and deployment.
-- Built SlothPay together with Ayush.
+- Co-engineered SlothPay's payment safety and trust infrastructure, contributing across backend development, conditional-payment security, database reliability, testing, code reviews, documentation and deployment preparation.
+
+- Contributed to SlothPay's PostgreSQL persistence, PayPal Sandbox integration, payment-state reliability, idempotency and concurrency safeguards through the team's task-based development and GitHub review workflow. Built Task 18's signed conditional-verification layer, including Redis replay protection, ownership validation and secure webhook handling.
+
+-Engineered the `POST /api/extensions/zapier/verify` FastAPI endpoint to securely accept condition-verification events, integrating **HMAC-SHA256 signatures, constant-time verification, five-minute timestamp validation and payment-owner checks** into the existing ConditionalPay capture/void workflow.
+
+-Developed the signed-webhook protocol and local testing utilities for Zapier-style event delivery, including a webhook sender and synthetic-only signing relay. Designed the integration boundary so external events must be authenticated and verified before authorizing conditional payment settlement. **Real Zapier-to-PayPal end-to-end integration requires separate validation.**
+
+-Implemented atomic Redis-backed event reservations with **seven-day replay protection**, preventing duplicate signed verification events from repeatedly triggering payment operations.
+
+- Strengthened session-signature validation to reject non-canonical signatures and improved PostgreSQL test isolation by using temporary test databases, reducing the risk of safety tests modifying shared application data.
+
+- Developed and validated **five PostgreSQL-backed Task 18 integration tests** covering successful capture, void, webhook replay rejection, payload tampering and incorrect ownership. Also verified **34 passing targeted security and recovery regression tests**, alongside clean Ruff checks.
+
+- Contributed through feature branches, pull requests and peer review, addressed Task 18 review findings involving webhook-secret documentation, UTF-8 BOM removal and route labeling. Reviewed Task 19's payment-timing and comparison implementation and checked its merge compatibility with the updated main branch.
+
+- Collaborated with Ayush on deployment planning, environment configuration, Render preparation, secure secret handling, technical documentation and hackathon submission readiness.
+
+Building payment systems that remain consistent when responses are lost, requests are retried, webhooks arrive repeatedly or external verification cannot be trusted.
 
 <table>
 <tr>
-
 <td width="60">
 <a href="https://www.linkedin.com/in/agrima-saxena-142960426/" title="LinkedIn">
 <img src="https://img.icons8.com/color/48/linkedin.png"
@@ -515,13 +527,11 @@ SlothPay/
 
 <td width="60">
 <a href="https://github.com/agcodes0315" title="GitHub">
-<img src="https://img.icons8.com/ios-glyphs/48/ffffff/github.png"
-     width="32"
-     height="32"
+<img src="https://img.shields.io/badge/GitHub-181717?style=for-the-badge&logo=github&logoColor=white"
+     height="30"
      alt="GitHub">
 </a>
 </td>
-
 </tr>
 </table>
 
