@@ -521,7 +521,14 @@ SlothPay/
 ---
 
 ### Ayush Verma
-**Relay Shield · Scoring and classifier, payment policy, case state machine, family approval codes, timers and Lambda branch, Shield UI, tests and documentation. Co-built Relay Shield with Agrima.**
+**Lead Software Developer · Project lead for SlothPay: planning, backend architecture, security, deployment, speed and documentation**
+
+- Planned the whole build as 19 ordered tasks, each with a goal, dependencies, a prompt and a test to pass.
+- Defined the safety core: the payment state machine, two-layer duplicate protection and lost-answer recovery.
+- Led the backend work on payments, webhooks, reconciliation, security hardening and the speed measurements (Task 19).
+- Deployed the hosted demo (API, database and Redis on Render, dashboard on Vercel) and set up the PayPal sandbox and webhook.
+- Ran the test suites, reviewed pull requests, and wrote the docs and submission pack.
+- Built SlothPay together with Agrima.
 
 <table>
 <tr>
