@@ -524,15 +524,20 @@ SlothPay/
 
 ---
 
-### Ayush Verma
-**Lead Software Developer · Project lead for SlothPay: planning, backend architecture, security, deployment, speed and documentation**
+###  Ayush Verma
+**Lead Software Developer · Backend Systems · Payment Reliability · Project Lead for SlothPay**
 
-- Planned the whole build as 19 ordered tasks, each with a goal, dependencies, a prompt and a test to pass.
-- Defined the safety core: the payment state machine, two-layer duplicate protection and lost-answer recovery.
-- Built the other half of the build tasks, including payments, webhooks, reconciliation, security hardening and the speed measurements (Task 19).
-- Deployed the hosted demo with Agrima (API, database and Redis on Render, dashboard on Vercel) and set up the PayPal sandbox and webhook.
-- Ran the test suites, reviewed pull requests, and wrote the docs and submission pack.
-- Built SlothPay together with Agrima.
+- Led SlothPay from idea to hosted demo: planned the build as 19 ordered tasks, each with a goal, dependencies, an AI-assisted prompt and a test to pass, and drove every task through its own branch, tests, review and merge.
+
+- Designed SlothPay's payment-safety core: a deterministic payment state machine, two-layer duplicate protection (idempotency key and Redis lock, plus a stable PayPal request id saved before sending) and `UNCERTAIN`-state recovery that asks PayPal what happened instead of guessing. Co-built the reconciliation, rescue-action and verified-webhook layers with Agrima.
+
+- Hardened security in Task 16: signed session cookies, per-route rate limits, a request-size cap, startup guards that refuse unsafe settings in demo and production, and a repository secret scanner.
+
+- Led Task 19, speed and swift transactions: one shared PayPal client with a pre-warmed token, a removed extra PayPal read, live updates and Sentry reports moved after the response, and a first recovery check at 0.3 seconds. Built per-payment timing that splits SlothPay's own time from PayPal's and the buyer's time, a `payment_timings` table and migration, `GET /api/speed`, a dashboard Speed panel, a Compare page and a latency benchmark. In a simulator run SlothPay's added time was p95 47 ms against a 100 ms target; all figures are sandbox or simulator numbers, not real PayPal speed.
+
+- Deployed the hosted demo with Agrima: API, PostgreSQL and Redis on Render, dashboard on Vercel, with in-API background workers, a PayPal sandbox webhook and Render and Docker configuration; wrote the deployment guide, including free-tier limits.
+
+- Verified quality across 1,000+ automated tests, including PostgreSQL-backed integration tests, with Ruff and secret scans; reviewed pull requests and their feedback, including Task 18's signed-verification review; and wrote the architecture, speed, AI-development, demo-script and submission documentation.
 
 <table>
 <tr>
