@@ -53,8 +53,8 @@ SlothPay preserves payment state across timeouts, retries, delayed approvals and
 | Resource | Link |
 |---|---|
 | Source code | [github.com/agcodes0315/SlothPay](https://github.com/agcodes0315/SlothPay) |
-| Hosted frontend | _Add the verified public URL after it is live_ |
-| API health check | _Add the verified backend URL + `/health`_ |
+| Hosted frontend | https://sloth-pay.vercel.app/ |
+| API health check | https://slothpay-api.onrender.com + `/health`_ |
 | Video walkthrough | _Add the published demo video URL_ |
 | Hackathon | [PayPal AI Hackathon 2026](https://paypalaihackathon.devpost.com/) |
 | Deployment guide | [`docs/deploy.md`](./docs/deploy.md) |
