@@ -483,7 +483,14 @@ SlothPay/
 ## Team
 
 ### Agrima Saxena
-**Software Engineering · Applied AI · Agentic Systems**
+**Software Engineer · Applied AI and Agentic Systems · Co-builder of SlothPay: about half of the build tasks, planning and deployment, tests and reviews**
+
+- Built about half of SlothPay's 19 build tasks, each delivered as its own pull request, and kept the branch-and-review workflow running.
+- Built Task 18, the signed ConditionalPay verification: HMAC-signed events, a five-minute window, Redis replay protection, a FastAPI endpoint and a local signing sender for testing.
+- Fixed session-signature checking so non-canonical signatures are rejected, and isolated the PostgreSQL test databases so safety tests do not touch shared data.
+- Wrote tests for her tasks, such as the signed-webhook lifecycle, and addressed review feedback after merge.
+- Worked with Ayush on planning and deployment.
+- Built SlothPay together with Ayush.
 
 <table>
 <tr>
@@ -525,8 +532,8 @@ SlothPay/
 
 - Planned the whole build as 19 ordered tasks, each with a goal, dependencies, a prompt and a test to pass.
 - Defined the safety core: the payment state machine, two-layer duplicate protection and lost-answer recovery.
-- Led the backend work on payments, webhooks, reconciliation, security hardening and the speed measurements (Task 19).
-- Deployed the hosted demo (API, database and Redis on Render, dashboard on Vercel) and set up the PayPal sandbox and webhook.
+- Built the other half of the build tasks, including payments, webhooks, reconciliation, security hardening and the speed measurements (Task 19).
+- Deployed the hosted demo with Agrima (API, database and Redis on Render, dashboard on Vercel) and set up the PayPal sandbox and webhook.
 - Ran the test suites, reviewed pull requests, and wrote the docs and submission pack.
 - Built SlothPay together with Agrima.
 
