@@ -110,12 +110,18 @@ def test_the_database_and_redis_come_from_the_created_resources(blueprint):
 
 def test_the_api_start_command_migrates_first_then_serves_on_render_port(blueprint):
     api = service(blueprint, "slothpay-api")
-    command = " ".join(api["dockerCommand"].split())
-    assert command.index("alembic upgrade head") < command.index("uvicorn backend.main:app")
-    assert "&&" in command and "exec uvicorn" in command
-    assert "--port $PORT" in command
-    assert "--proxy-headers" in command
+    # Render could not run a quoted one-line command, so the command is a script file.
+    assert " ".join(api["dockerCommand"].split()) == "sh /app/scripts/start_render.sh"
+    script = (ROOT / "scripts" / "start_render.sh").read_text()
+    assert script.startswith("#!/bin/sh")
+    assert "set -e" in script, "a failed migration must stop the start"
+    assert script.index("alembic upgrade head") < script.index("uvicorn backend.main:app")
+    assert "exec uvicorn" in script
+    assert '--port "${PORT:-10000}"' in script
+    assert "--proxy-headers" in script
     assert api["healthCheckPath"] == "/health"
+    dockerfile = (ROOT / "Dockerfile").read_text()
+    assert "COPY scripts ./scripts" in dockerfile, "the script must be inside the image"
 
 
 def test_the_two_public_addresses_match_the_service_names(blueprint):
